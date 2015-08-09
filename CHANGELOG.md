@@ -516,6 +516,54 @@
 
 * Made Azure Service Bus transport stop the peek lock renewal timer when the transaction context goes into the commit/rollback/cleanup phase. Seems more right, and it avoids a pesky race that could result in confusing `MessageLockLostException`s if the message would happen to be successfully completed right before attempting to renew the peek lock.
 
+## 0.90.0
+
+* Refactored most of Rebus! NOTE: (very) breaking change!! - 0.90.0 version series will function as ALPHA and BETA of what will become Rebus 2.0.0
+* Introduced pipelines for message send and receive
+* New configuration API based on Injectionist
+* Simpler transaction handling, simpler `ITransport` abstration
+* Idempotent sagas
+* Several new integrations: Jil, Azure Storage Queues, Amazon SQS
+* Async to the core! (i.e. remember to `bus.Send(yourMessage).Wait()` if you cannot `await bus.Send(yourMessage)`)
+* Routing based on topics - type-based routing ("Rebus Classic") is just a subset of this
+* Batching features completely removed
+* In-memory transport can be used for in-process communication and testing
+* Ground laid for more advanced control of Rebus internals, e.g. to implement auto-scaling of number of workers, diagnostics, etc.
+* Tests refactored to make it much much easier to introduce new implementations based on contract tests
+
+## 0.90.1
+
+* Added `TransactionScope` support via the `Rebus.TransactionScope` package (note: requires at least .NET 4.5.1 for `TransactionScopeAsyncFlowOption.Enabled` to be there)
+
+## 0.90.2
+
+* Added ability to storage subscriptions in a JSON file
+
+## 0.90.3
+
+* Added RavenDB persistence for subscriptions and timeouts - thanks [mclausen]
+
+## 0.90.4
+
+* Added experimental legacy compatility option (`.Options(o => o.EnableLegacyCompatibility())`)
+
+## 0.90.5
+
+* Made MSMQ transport work better in legacy mode
+
+## 0.90.6
+
+* Added ability to use external timeout manager
+
+## 0.90.7
+
+* Added some more headers to audited messages
+* Added PostgreSQL persistence
+
+## 0.90.8
+
+* Added pub/sub support to legacy compatibility mode
+
 
 [AndreaCuneo]: https://github.com/AndreaCuneo
 [arneeiri]: https://github.com/arneeiri
@@ -531,6 +579,7 @@
 [krivin]: https://github.com/krivin
 [maeserichar]: https://github.com/maeserichar
 [maxx1337]: https://github.com/maxx1337
+[mclausen]: https://github.com/mclausen
 [mgayeski]: https://github.com/mgayeski
 [mgibas]: https://github.com/mgibas
 [oguzhaneren]: https://github.com/oguzhaneren
