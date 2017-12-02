@@ -1,26 +1,38 @@
 ﻿using System;
 using System.Threading;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using Rebus.Activation;
 using Rebus.Bus;
 using Rebus.Compression;
 using Rebus.Config;
-using Rebus.Tests.Extensions;
+using Rebus.Tests.Contracts;
+using Rebus.Tests.Contracts.Extensions;
 using Rebus.Transport.InMem;
+#pragma warning disable 1998
 
 namespace Rebus.Tests.Compression
 {
     [TestFixture]
     public class TestCompressionIntegration : FixtureBase
     {
-        [TestCase(true)]
-        [TestCase(false)]
-        public void ItWorksWithString(bool withCompressionEnabled)
+        readonly InMemNetwork _network = new InMemNetwork();
+        BuiltinHandlerActivator _activator;
+
+        protected override void SetUp()
         {
-            var activator = new BuiltinHandlerActivator();
+            _network.Reset();
+            _activator = new BuiltinHandlerActivator();
+
+            Using(_activator);
+        }
+
+        [Test]
+        public async Task DecompressionIsEnabledByDefault()
+        {
             var gotIt = new ManualResetEvent(false);
 
-            activator.Handle<string>(async str =>
+            _activator.Handle<string>(async str =>
             {
                 if (string.Equals(str, LongText))
                 {
@@ -28,14 +40,42 @@ namespace Rebus.Tests.Compression
                 }
                 else
                 {
-                    throw new Exception(string.Format("Received text with {0} chars did not match expected text with {1} chars!",
-                        str.Length, LongText.Length));
+                    throw new Exception(
+                        $"Received text with {str.Length} chars did not match expected text with {LongText.Length} chars!");
                 }
             });
 
-            Using(activator);
+            // start bus with compression DISABLED
+            CreateBus(false, _activator, "compressor");
 
-            var bus = CreateBus(withCompressionEnabled, activator);
+            // send long text with compression ENABLED
+            var client = CreateBus(true, Using(new BuiltinHandlerActivator()));
+            await client.Advanced.Routing.Send("compressor", LongText);
+
+            // see that it gets handled as it should
+            gotIt.WaitOrDie(TimeSpan.FromSeconds(10));
+        }
+
+        [TestCase(true)]
+        [TestCase(false)]
+        public void ItWorksWithString(bool withCompressionEnabled)
+        {
+            var gotIt = new ManualResetEvent(false);
+
+            _activator.Handle<string>(async str =>
+            {
+                if (string.Equals(str, LongText))
+                {
+                    gotIt.Set();
+                }
+                else
+                {
+                    throw new Exception(
+                        $"Received text with {str.Length} chars did not match expected text with {LongText.Length} chars!");
+                }
+            });
+
+            var bus = CreateBus(withCompressionEnabled, _activator, "compressor");
 
             bus.SendLocal(LongText).Wait();
 
@@ -46,10 +86,9 @@ namespace Rebus.Tests.Compression
         [TestCase(false)]
         public void ItWorksWithComplexMessage(bool withCompressionEnabled)
         {
-            var activator = new BuiltinHandlerActivator();
             var gotIt = new ManualResetEvent(false);
 
-            activator.Handle<TextMessage>(async str =>
+            _activator.Handle<TextMessage>(async str =>
             {
                 if (string.Equals(str.Text, LongText))
                 {
@@ -57,24 +96,32 @@ namespace Rebus.Tests.Compression
                 }
                 else
                 {
-                    throw new Exception(string.Format("Received text with {0} chars did not match expected text with {1} chars!",
-                        str.Text.Length, LongText.Length));
+                    throw new Exception(
+                        $"Received text with {str.Text.Length} chars did not match expected text with {LongText.Length} chars!");
                 }
             });
 
-            Using(activator);
+            var bus = CreateBus(withCompressionEnabled, _activator, "compressor");
 
-            var bus = CreateBus(withCompressionEnabled, activator);
-
-            bus.SendLocal(new TextMessage {Text = LongText}).Wait();
+            bus.SendLocal(new TextMessage { Text = LongText }).Wait();
 
             gotIt.WaitOrDie(TimeSpan.FromSeconds(10));
         }
 
-        static IBus CreateBus(bool withCompressionEnabled, BuiltinHandlerActivator activator)
+        IBus CreateBus(bool withCompressionEnabled, BuiltinHandlerActivator activator, string inputQueueOrNull = null)
         {
             var bus = Configure.With(activator)
-                .Transport(t => t.UseInMemoryTransport(new InMemNetwork(), "compressor"))
+                .Transport(t =>
+                {
+                    if (string.IsNullOrWhiteSpace(inputQueueOrNull))
+                    {
+                        t.UseInMemoryTransportAsOneWayClient(_network);
+                    }
+                    else
+                    {
+                        t.UseInMemoryTransport(_network, inputQueueOrNull);
+                    }
+                })
                 .Options(o =>
                 {
                     o.LogPipeline();

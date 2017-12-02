@@ -4,11 +4,12 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 using Rebus.Activation;
 using Rebus.Config;
-using Rebus.Extensions;
-using Rebus.Persistence.SqlServer;
+using Rebus.Persistence.InMem;
 using Rebus.Routing.TypeBased;
-using Rebus.Tests.Extensions;
+using Rebus.Tests.Contracts;
+using Rebus.Tests.Contracts.Extensions;
 using Rebus.Transport.InMem;
+#pragma warning disable 1998
 
 namespace Rebus.Tests.Integration
 {
@@ -21,12 +22,11 @@ namespace Rebus.Tests.Integration
 
         protected override void SetUp()
         {
-            SqlTestHelper.DropTable("subscriptions");
-
             var network = new InMemNetwork();
+            var subscriberStore = new InMemorySubscriberStore();
             _publisher = GetEndpoint(network, "publisher", c =>
             {
-                c.Subscriptions(s => s.StoreInSqlServer(SqlTestHelper.ConnectionString, "subscriptions"));
+                c.Subscriptions(s => s.StoreInMemory(subscriberStore));
                 c.Routing(r => r.TypeBased());
             });
 
@@ -43,7 +43,7 @@ namespace Rebus.Tests.Integration
         {
             await _client1.Bus.Subscribe<SomeKindOfEvent>();
 
-            await Task.Delay(500);
+            await Task.Delay(1000);
 
             await _publisher.Bus.Publish(new SomeKindOfEvent());
 
@@ -55,7 +55,7 @@ namespace Rebus.Tests.Integration
         {
             await _client1.Bus.Subscribe<SomeKindOfEvent>();
 
-            await Task.Delay(500);
+            await Task.Delay(1000);
 
             object someKindOfEvent = new SomeKindOfEvent();
 
@@ -73,11 +73,8 @@ namespace Rebus.Tests.Integration
             var configurer = Configure.With(activator)
                 .Transport(t => t.UseInMemoryTransport(network, queueName));
 
-            if (additionalConfiguration != null)
-            {
-                additionalConfiguration(configurer);
-            }
-             
+            additionalConfiguration?.Invoke(configurer);
+
             configurer.Start();
 
             return activator;

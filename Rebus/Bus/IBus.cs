@@ -3,9 +3,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Rebus.Bus.Advanced;
 using Rebus.Messages;
-using Rebus.Messages.Control;
 using Rebus.Routing;
-using Rebus.Subscriptions;
 
 namespace Rebus.Bus
 {
@@ -15,51 +13,88 @@ namespace Rebus.Bus
     public interface IBus : IDisposable
     {
         /// <summary>
-        /// Sends the specified message to our own input queue address
+        /// Sends the specified command message to this instance's own input queue, optionally specifying some headers to attach to the message
         /// </summary>
         Task SendLocal(object commandMessage, Dictionary<string, string> optionalHeaders = null);
 
         /// <summary>
-        /// Sends the specified message to a destination that is determined by calling <see cref="IRouter.GetDestinationAddress"/>
+        /// Sends the specified command message to the address mapped as the owner of the message type, optionally specifying some headers to attach to the message
         /// </summary>
         Task Send(object commandMessage, Dictionary<string, string> optionalHeaders = null);
 
         /// <summary>
-        /// Sends the specified reply message to a destination that is determined by looking up the <see cref="Headers.ReturnAddress"/> header of the message currently being handled.
-        /// This method can only be called from within a message handler.
+        /// Defers into the future the specified message, optionally specifying some headers to attach to the message. Unless the <see cref="Headers.DeferredRecipient"/> is specified
+        /// in a header, the bus instance's own input queue address will be set as the return address, which will cause the message to be delivered to that address when the <paramref name="delay"/>
+        /// has elapsed.
         /// </summary>
-        Task Reply(object replyMessage, Dictionary<string, string> optionalHeaders = null);
+        Task DeferLocal(TimeSpan delay, object message, Dictionary<string, string> optionalHeaders = null);
 
         /// <summary>
-        /// Publishes the specified message to the specified topic. Default behavior is to look up the addresses of those who subscribed to the given topic
-        /// by calling <see cref="ISubscriptionStorage.GetSubscriberAddresses"/> but the transport may override this behavior if it has special capabilities.
-        /// </summary>
-        Task Publish(string topic, object eventMessage, Dictionary<string, string> optionalHeaders = null);
-
-        /// <summary>
-        /// Defers the delivery of the message by attaching a <see cref="Headers.DeferredUntil"/> header to it and delivering it to the configured timeout manager endpoint
-        /// (defaults to be ourselves). When the time is right, the deferred message is returned to the address indicated by the <see cref="Headers.ReturnAddress"/> header.
+        /// Defers into the future the specified message, optionally specifying some headers to attach to the message. Unless the <see cref="Headers.DeferredRecipient"/> is specified
+        /// in a header, the endpoint mapping corresponding to the sent message will be set as the return address, which will cause the message to be delivered to that address when the <paramref name="delay"/>
+        /// has elapsed.
         /// </summary>
         Task Defer(TimeSpan delay, object message, Dictionary<string, string> optionalHeaders = null);
 
         /// <summary>
-        /// Subscribes the current endpoint to the given topic. If the <see cref="ISubscriptionStorage"/> is centralized (determined by checking <see cref="ISubscriptionStorage.IsCentralized"/>),
-        /// the subscription is registered immediately. If not, the owner of the given topic is checked (by calling <see cref="IRouter.GetOwnerAddress"/>), and a
-        /// <see cref="SubscribeRequest"/> is sent to the owning endpoint).
+        /// Replies back to the endpoint specified as return address on the message currently being handled. Throws an <see cref="InvalidOperationException"/> if called outside of a proper message context.
         /// </summary>
-        Task Subscribe(string topic);
+        Task Reply(object replyMessage, Dictionary<string, string> optionalHeaders = null);
 
         /// <summary>
-        /// Unsubscribes the current endpoint from the given topic. If the <see cref="ISubscriptionStorage"/> is centralized (determined by checking <see cref="ISubscriptionStorage.IsCentralized"/>),
-        /// the subscription is removed immediately. If not, the owner of the given topic is checked (by calling <see cref="IRouter.GetOwnerAddress"/>), and an
-        /// <see cref="UnsubscribeRequest"/> is sent to the owning endpoint).
+        /// Subscribes to the topic defined by the assembly-qualified name of <typeparamref name="TEvent"/>. 
+        /// While this kind of subscription can work universally with the general topic-based routing, it works especially well with type-based routing,
+        /// which can be enabled by going 
+        /// <code>
+        /// Configure.With(...)
+        ///     .(...)
+        ///     .Routing(r => r.TypeBased()
+        ///             .Map&lt;SomeMessage&gt;("someEndpoint")
+        ///             .(...))
+        /// </code>
+        /// in the configuration
         /// </summary>
-        Task Unsubscribe(string topic);
+        Task Subscribe<TEvent>();
 
         /// <summary>
-        /// Explicitly routes the <see cref="explicitlyRoutedMessage"/> to the destination specified by <see cref="destinationAddress"/>
+        /// Subscribes to the topic defined by the assembly-qualified name of <paramref name="eventType"/>. 
+        /// While this kind of subscription can work universally with the general topic-based routing, it works especially well with type-based routing,
+        /// which can be enabled by going 
+        /// <code>
+        /// Configure.With(...)
+        ///     .(...)
+        ///     .Routing(r => r.TypeBased()
+        ///             .Map&lt;SomeMessage&gt;("someEndpoint")
+        ///             .(...))
+        /// </code>
+        /// in the configuration
         /// </summary>
-        Task Route(string destinationAddress, object explicitlyRoutedMessage, Dictionary<string, string> optionalHeaders = null);
+        Task Subscribe(Type eventType);
+
+        /// <summary>
+        /// Unsubscribes from the topic defined by the assembly-qualified name of <typeparamref name="TEvent"/>
+        /// </summary>
+        Task Unsubscribe<TEvent>();
+
+        /// <summary>
+        /// Unsubscribes from the topic defined by the assembly-qualified name of <paramref name="eventType"/>
+        /// </summary>
+        Task Unsubscribe(Type eventType);
+
+        /// <summary>
+        /// Publishes the event message on the topic defined by the assembly-qualified name of the type of the message.
+        /// While this kind of pub/sub can work universally with the general topic-based routing, it works especially well with type-based routing,
+        /// which can be enabled by going 
+        /// <code>
+        /// Configure.With(...)
+        ///     .(...)
+        ///     .Routing(r => r.TypeBased()
+        ///             .Map&lt;SomeMessage&gt;("someEndpoint")
+        ///             .(...))
+        /// </code>
+        /// in the configuration
+        /// </summary>
+        Task Publish(object eventMessage, Dictionary<string, string> optionalHeaders = null);
 
         /// <summary>
         /// Gets the API for advanced features of the bus

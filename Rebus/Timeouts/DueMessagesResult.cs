@@ -2,6 +2,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 
 namespace Rebus.Timeouts
 {
@@ -11,28 +12,33 @@ namespace Rebus.Timeouts
     /// </summary>
     public class DueMessagesResult : IEnumerable<DueMessage>, IDisposable
     {
-        readonly Action _cleanupAction;
         readonly List<DueMessage> _dueMessages;
+
+        Func<Task> _cleanupAction;
 
         /// <summary>
         /// Constructs the result, wrapping the given list of due messages, performing the given action when the instance is disposed
         /// </summary>
-        public DueMessagesResult(IEnumerable<DueMessage> dueMessages, Action cleanupAction = null)
+        public DueMessagesResult(IEnumerable<DueMessage> dueMessages, Func<Task> cleanupAction = null)
         {
             _cleanupAction = cleanupAction;
             _dueMessages = dueMessages.ToList();
         }
 
         /// <summary>
+        /// Gets an empty due messages result
+        /// </summary>
+        public static readonly DueMessagesResult Empty = new DueMessagesResult(Enumerable.Empty<DueMessage>());
+
+        /// <summary>
+        /// Completes the result by running the clean-up action
+        /// </summary>
+        public async Task Complete() => await CleanUp().ConfigureAwait(false);
+
+        /// <summary>
         /// Invokes the cleanup action
         /// </summary>
-        public void Dispose()
-        {
-            if (_cleanupAction == null) return;
-
-            _cleanupAction();
-        }
-
+        public void Dispose() => CleanUp().Wait();
 
         /// <summary>
         /// Returns all due messages from this result
@@ -45,6 +51,20 @@ namespace Rebus.Timeouts
         IEnumerator IEnumerable.GetEnumerator()
         {
             return GetEnumerator();
+        }
+
+        async Task CleanUp()
+        {
+            if (_cleanupAction == null) return;
+
+            try
+            {
+                await _cleanupAction().ConfigureAwait(false);
+            }
+            finally
+            {
+                _cleanupAction = null;
+            }
         }
     }
 }

@@ -11,22 +11,43 @@ namespace Rebus.Encryption
     public static class EncryptionConfigurationExtensions
     {
         /// <summary>
-        /// Configures Rebus to encrypt outgoing messages and be able to decrypt incoming messages. Please note that it's only the message bodies that are
-        /// encrypted, thus everything included in the message headers will be visible to eavesdroppers.
+        /// Configures Rebus to encrypt outgoing messages and be able to decrypt incoming messages. 
+        /// Uses the default "Rijndael" algorithm which is 256 bit AES encryption.
+        /// Please note that it's only the message bodies that are encrypted, thus everything included in the message headers will be visible to eavesdroppers.
         /// </summary>
-        public static OptionsConfigurer EnableEncryption(this OptionsConfigurer configurer, string key)
+        public static void EnableEncryption(this OptionsConfigurer configurer, string key)
         {
-            configurer.Register(c => new Encryptor(key));
+#if NET45
+            EnableCustomEncryption(configurer).Register(c => new RijndaelEncryptor(key));
+#elif NETSTANDARD1_3
+            EnableCustomEncryption(configurer).Register(c => new AesEncryptor(key));
+#endif
+        }
 
-            configurer.Register(c => new EncryptMessagesOutgoingStep(c.Get<Encryptor>()));
-            configurer.Register(c => new DecryptMessagesIncomingStep(c.Get<Encryptor>()));
+        /// <summary>
+        /// Configures Rebus to encrypt outgoing messages and be able to decrypt incoming messages using custom encryption provider.
+        /// Please note that it's only the message bodies that are encrypted, thus everything included in the message headers will be visible to eavesdroppers.
+        /// Custom encrypotion providers are configured by building on the returned configurer, e.g. like so:
+        /// <code>
+        /// Configure.With(...)
+        ///     .(...)
+        ///     .Options(o => {
+        ///         o.EnableCustomEncryption()
+        ///             .Use***();
+        ///     })
+        ///     .Start();
+        /// </code>
+        /// </summary>
+        public static StandardConfigurer<IEncryptor> EnableCustomEncryption(this OptionsConfigurer configurer)
+        {
+            configurer.Register(c => new EncryptMessagesOutgoingStep(c.Get<IEncryptor>()));
+            configurer.Register(c => new DecryptMessagesIncomingStep(c.Get<IEncryptor>()));
 
             configurer.Decorate<IPipeline>(c => new PipelineStepInjector(c.Get<IPipeline>())
                 .OnReceive(c.Get<DecryptMessagesIncomingStep>(), PipelineRelativePosition.Before, typeof(DeserializeIncomingMessageStep))
                 .OnSend(c.Get<EncryptMessagesOutgoingStep>(), PipelineRelativePosition.After, typeof(SerializeOutgoingMessageStep)));
 
-            return configurer;
+            return StandardConfigurer<IEncryptor>.GetConfigurerFrom(configurer);
         }
-
     }
 }

@@ -5,40 +5,44 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 using Rebus.Activation;
 using Rebus.Config;
-using Rebus.Tests.Extensions;
-using Rebus.Transport.Msmq;
+using Rebus.Persistence.InMem;
+using Rebus.Tests.Contracts;
+using Rebus.Tests.Contracts.Extensions;
+using Rebus.Transport.InMem;
+
+#pragma warning disable 1998
 
 namespace Rebus.Tests.Timeouts
 {
     [TestFixture]
     public class TestInternalTimeoutManager : FixtureBase
     {
-        readonly string _queueName = TestConfig.QueueName("timeouts");
+        readonly string _queueName = TestConfig.GetName("timeouts");
 
         [Test]
-        public async Task WorksOutOfTheBoxWithInternalTimeoutManager()
+        public async Task WorksOutOfTheBoxWithInternalTimeoutManager_WhenInMemTimeoutsIsConfigure()
         {
-            var gotTheMessage = new ManualResetEvent(false);
-            var activator = new BuiltinHandlerActivator();
+            using (var activator = new BuiltinHandlerActivator())
+            {
+                var gotTheMessage = new ManualResetEvent(false);
 
-            activator.Handle<string>(async str => gotTheMessage.Set());
+                activator.Handle<string>(async str => gotTheMessage.Set());
 
-            Configure.With(activator)
-                .Transport(t => t.UseMsmq(_queueName))
-                .Start();
+                Configure.With(activator)
+                    .Transport(t => t.UseInMemoryTransport(new InMemNetwork(), _queueName))
+                    .Timeouts(t => t.StoreInMemory())
+                    .Start();
 
-            var stopwatch = Stopwatch.StartNew();
+                var stopwatch = Stopwatch.StartNew();
 
-            await activator.Bus.Defer(TimeSpan.FromSeconds(5), "hej med dig min ven!");
+                await activator.Bus.DeferLocal(TimeSpan.FromSeconds(5), "hej med dig min ven!");
 
-            gotTheMessage.WaitOrDie(TimeSpan.FromSeconds(6), "Message was not received within 6,5 seconds (which it should have been since it was only deferred 5 seconds)");
-            
-            Assert.That(stopwatch.Elapsed, Is.GreaterThan(TimeSpan.FromSeconds(5)), "It must take more than 5 second to get the message back");
-        }
+                gotTheMessage.WaitOrDie(TimeSpan.FromSeconds(6.5),
+                    "Message was not received within 6,5 seconds (which it should have been since it was only deferred 5 seconds)");
 
-        protected override void TearDown()
-        {
-            MsmqUtil.Delete(_queueName);
+                Assert.That(stopwatch.Elapsed, Is.GreaterThan(TimeSpan.FromSeconds(5)),
+                    "It must take more than 5 second to get the message back");
+            }
         }
     }
 }

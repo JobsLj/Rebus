@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Threading;
+using System.Threading.Tasks;
 using Rebus.Extensions;
 using Rebus.Messages;
 
@@ -13,10 +14,10 @@ namespace Rebus.Transport.InMem
     {
         static int _networkIdCounter;
 
-        readonly string _networkId = string.Format("In-mem network {0}", Interlocked.Increment(ref _networkIdCounter));
+        readonly string _networkId = $"In-mem network {Interlocked.Increment(ref _networkIdCounter)}";
 
         readonly ConcurrentDictionary<string, ConcurrentQueue<InMemTransportMessage>> _queues =
-            new ConcurrentDictionary<string, ConcurrentQueue<InMemTransportMessage>>(StringComparer.InvariantCultureIgnoreCase);
+            new ConcurrentDictionary<string, ConcurrentQueue<InMemTransportMessage>>(StringComparer.OrdinalIgnoreCase);
 
         readonly bool _outputEventsToConsole;
 
@@ -30,7 +31,7 @@ namespace Rebus.Transport.InMem
 
             if (_outputEventsToConsole)
             {
-                Console.WriteLine("Created in-mem network '{0}'", _networkId);
+                Console.WriteLine($"Created in-mem network '{_networkId}'");
             }
         }
 
@@ -39,7 +40,8 @@ namespace Rebus.Transport.InMem
         /// </summary>
         public void Reset()
         {
-            Console.WriteLine("Resetting in-mem network '{0}'", _networkId);
+            Console.WriteLine($"Resetting in-mem network '{_networkId}'");
+
             _queues.Clear();
         }
 
@@ -50,12 +52,14 @@ namespace Rebus.Transport.InMem
         /// </summary>
         public void Deliver(string destinationAddress, InMemTransportMessage msg, bool alwaysQuiet = false)
         {
-            if (destinationAddress == null) throw new ArgumentNullException("destinationAddress");
-            if (msg == null) throw new ArgumentNullException("msg");
+            if (destinationAddress == null) throw new ArgumentNullException(nameof(destinationAddress));
+            if (msg == null) throw new ArgumentNullException(nameof(msg));
 
             if (_outputEventsToConsole && !alwaysQuiet)
             {
-                Console.WriteLine("{0} ---> {1} ({2})", msg.Headers.GetValueOrNull(Headers.MessageId) ?? "<no message ID>", destinationAddress, _networkId);
+                var messageId = msg.Headers.GetValueOrNull(Headers.MessageId) ?? "<no message ID>";
+
+                Console.WriteLine($"{messageId} ---> {destinationAddress} ({_networkId})");
             }
 
             var messageQueue = _queues
@@ -65,41 +69,37 @@ namespace Rebus.Transport.InMem
         }
 
         /// <summary>
-        /// Gets the next message from the queue with the given <see cref="inputQueueName"/>, returning null if no messages are available.
+        /// Gets the next message from the queue with the given <paramref name="inputQueueName"/>, returning null if no messages are available.
         /// </summary>
         public InMemTransportMessage GetNextOrNull(string inputQueueName)
         {
-            if (inputQueueName == null) throw new ArgumentNullException("inputQueueName");
-
-            InMemTransportMessage message;
+            if (inputQueueName == null) throw new ArgumentNullException(nameof(inputQueueName));
 
             var messageQueue = _queues.GetOrAdd(inputQueueName, address => new ConcurrentQueue<InMemTransportMessage>());
 
-            if (!messageQueue.TryDequeue(out message)) return null;
-
-            if (MessageIsExpired(message))
+            while (true)
             {
-                Console.WriteLine("{0} EXP> {1} ({2})", inputQueueName, message.Headers.GetValueOrNull(Headers.MessageId) ?? "<no message ID>", _networkId);
-                return null;
+                InMemTransportMessage message;
+                if (!messageQueue.TryDequeue(out message)) return null;
+
+                var messageId = message.Headers.GetValueOrNull(Headers.MessageId) ?? "<no message ID>";
+
+                if (MessageIsExpired(message))
+                {
+                    if (_outputEventsToConsole)
+                    {
+                        Console.WriteLine($"{inputQueueName} EXPIRED> {messageId} ({_networkId})");
+                    }
+                    continue;
+                }
+
+                if (_outputEventsToConsole)
+                {
+                    Console.WriteLine($"{inputQueueName} ---> {messageId} ({_networkId})");
+                }
+
+                return message;
             }
-
-            if (_outputEventsToConsole)
-            {
-                Console.WriteLine("{0} ---> {1} ({2})", inputQueueName, message.Headers.GetValueOrNull(Headers.MessageId) ?? "<no message ID>", _networkId);
-            }
-
-            return message;
-        }
-
-        bool MessageIsExpired(InMemTransportMessage message)
-        {
-            var headers= message.Headers;
-            if (!headers.ContainsKey(Headers.TimeToBeReceived)) return false;
-
-            var timeToBeReceived = headers[Headers.TimeToBeReceived];
-            var maximumAge = TimeSpan.Parse(timeToBeReceived);
-
-            return message.Age > maximumAge;
         }
 
         /// <summary>
@@ -116,6 +116,27 @@ namespace Rebus.Transport.InMem
         public void CreateQueue(string address)
         {
             _queues.TryAdd(address, new ConcurrentQueue<InMemTransportMessage>());
+        }
+
+        /// <summary>
+        /// Gets the number of messages in the queue with the given <paramref name="address"/>
+        /// </summary>
+        public int GetCount(string address)
+        {
+            return _queues.TryGetValue(address, out var queue)
+                ? queue.Count
+                : 0;
+        }
+
+        static bool MessageIsExpired(InMemTransportMessage message)
+        {
+            var headers= message.Headers;
+            if (!headers.ContainsKey(Headers.TimeToBeReceived)) return false;
+
+            var timeToBeReceived = headers[Headers.TimeToBeReceived];
+            var maximumAge = TimeSpan.Parse(timeToBeReceived);
+
+            return message.Age > maximumAge;
         }
     }
 }

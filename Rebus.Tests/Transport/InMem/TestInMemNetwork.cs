@@ -1,9 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.IO;
 using NUnit.Framework;
 using Rebus.Extensions;
 using Rebus.Messages;
+using Rebus.Tests.Contracts;
 using Rebus.Transport.InMem;
 
 namespace Rebus.Tests.Transport.InMem

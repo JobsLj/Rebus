@@ -9,16 +9,17 @@ namespace Rebus.Encryption
     /// <summary>
     /// Outgoing pipeline step that encrypts the contents of the outgoing message
     /// </summary>
+    [StepDocumentation("Encrypts the body of the outgoing message, unless the special '" + EncryptionHeaders.DisableEncryptionHeader + "' header has been added to the message")]
     public class EncryptMessagesOutgoingStep : IOutgoingStep
     {
-        readonly Encryptor _encryptor;
+        readonly IEncryptor _encryptor;
 
         /// <summary>
         /// Constructs the step with the given encryptor
         /// </summary>
-        public EncryptMessagesOutgoingStep(Encryptor encryptor)
+        public EncryptMessagesOutgoingStep(IEncryptor encryptor)
         {
-            _encryptor = encryptor;
+            _encryptor = encryptor ?? throw new ArgumentNullException(nameof(encryptor));
         }
 
         /// <summary>
@@ -28,15 +29,22 @@ namespace Rebus.Encryption
         {
             var transportMessage = context.Load<TransportMessage>();
 
+            if (transportMessage.Headers.ContainsKey(EncryptionHeaders.DisableEncryptionHeader))
+            {
+                await next().ConfigureAwait(false);
+                return;
+            }
+
             var headers = transportMessage.Headers.Clone();
             var bodyBytes = transportMessage.Body;
             var encryptedData = _encryptor.Encrypt(bodyBytes);
-            
-            headers[EncryptionHeaders.ContentEncryption] = "rijndael";
+
+            headers[EncryptionHeaders.ContentEncryption] = _encryptor.ContentEncryptionValue;
             headers[EncryptionHeaders.ContentInitializationVector] = Convert.ToBase64String(encryptedData.Iv);
+
             context.Save(new TransportMessage(headers, encryptedData.Bytes));
 
-            await next();
+            await next().ConfigureAwait(false);
         }
     }
 }

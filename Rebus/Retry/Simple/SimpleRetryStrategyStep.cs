@@ -1,15 +1,14 @@
 ﻿using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using Rebus.Bus;
+using Rebus.Exceptions;
 using Rebus.Extensions;
-using Rebus.Logging;
 using Rebus.Messages;
 using Rebus.Pipeline;
-using Rebus.Threading;
+using Rebus.Retry.FailFast;
 using Rebus.Transport;
+// ReSharper disable ForCanBeConvertedToForeach
+// ReSharper disable ArgumentsStyleOther
 
 namespace Rebus.Retry.Simple
 {
@@ -21,43 +20,25 @@ namespace Rebus.Retry.Simple
     [StepDocumentation(@"Wraps the invocation of the entire receive pipeline in an exception handler, tracking the number of times the received message has been attempted to be delivered.
 
 If the maximum number of delivery attempts is reached, the message is moved to the error queue.")]
-    public class SimpleRetryStrategyStep : IRetryStrategyStep, IInitializable, IDisposable
+    public class SimpleRetryStrategyStep : IRetryStrategyStep
     {
-        const string BackgroundTaskName = "CleanupTrackedErrors";
-        static readonly TimeSpan MoveToErrorQueueFailedPause = TimeSpan.FromSeconds(5);
-        static ILog _log;
+        /// <summary>
+        /// Key of a step context item that indicates that the message must be wrapped in a <see cref="FailedMessageWrapper{TMessage}"/> after being deserialized
+        /// </summary>
+        public const string DispatchAsFailedMessageKey = "dispatch-as-failed-message";
 
-        static SimpleRetryStrategyStep()
-        {
-            RebusLoggerFactory.Changed += f => _log = f.GetCurrentClassLogger();
-        }
-
-        readonly ConcurrentDictionary<string, ErrorTracking> _trackedErrors = new ConcurrentDictionary<string, ErrorTracking>();
         readonly SimpleRetryStrategySettings _simpleRetryStrategySettings;
-        readonly AsyncTask _cleanupOldTrackedErrorsTask;
-        readonly ITransport _transport;
-
-        bool _disposed;
+        readonly IErrorTracker _errorTracker;
+        readonly IErrorHandler _errorHandler;
 
         /// <summary>
         /// Constructs the step, using the given transport and settings
         /// </summary>
-        public SimpleRetryStrategyStep(ITransport transport, SimpleRetryStrategySettings simpleRetryStrategySettings)
+        public SimpleRetryStrategyStep(SimpleRetryStrategySettings simpleRetryStrategySettings, IErrorTracker errorTracker, IErrorHandler errorHandler)
         {
-            _transport = transport;
-            _simpleRetryStrategySettings = simpleRetryStrategySettings;
-            _cleanupOldTrackedErrorsTask = new AsyncTask(BackgroundTaskName, CleanupOldTrackedErrors)
-            {
-                Interval = TimeSpan.FromMinutes(1)
-            };
-        }
-
-        /// <summary>
-        /// Last-resort shudown of the background task for cleaning up tracked errors (<see cref="BackgroundTaskName"/>)
-        /// </summary>
-        ~SimpleRetryStrategyStep()
-        {
-            Dispose(false);
+            _simpleRetryStrategySettings = simpleRetryStrategySettings ?? throw new ArgumentNullException(nameof(simpleRetryStrategySettings));
+            _errorTracker = errorTracker ?? throw new ArgumentNullException(nameof(errorTracker));
+            _errorHandler = errorHandler ?? throw new ArgumentNullException(nameof(errorHandler));
         }
 
         /// <summary>
@@ -72,196 +53,88 @@ If the maximum number of delivery attempts is reached, the message is moved to t
 
             if (string.IsNullOrWhiteSpace(messageId))
             {
-                await MoveMessageToErrorQueue("<no message ID>", transportMessage,
-                    transactionContext, string.Format("Received message with empty or absent '{0}' header! All messages must be" +
-                                                      " supplied with an ID . If no ID is present, the message cannot be tracked" +
-                                                      " between delivery attempts, and other stuff would also be much harder to" +
-                                                      " do - therefore, it is a requirement that messages be supplied with an ID.",
-                        Headers.MessageId),
-                        shortErrorDescription: "Received message with empty or absent 'rbs2-msg-id' header");
+                await MoveMessageToErrorQueue(context.Load<OriginalTransportMessage>(), transactionContext,
+                    new RebusApplicationException($"Received message with empty or absent '{Headers.MessageId}' header! All messages must be" +
+                                                  " supplied with an ID . If no ID is present, the message cannot be tracked" +
+                                                  " between delivery attempts, and other stuff would also be much harder to" +
+                                                  " do - therefore, it is a requirement that messages be supplied with an ID."))
+                    .ConfigureAwait(false);
 
                 return;
             }
 
-            if (HasFailedTooManyTimes(messageId))
+            if (_errorTracker.HasFailedTooManyTimes(messageId))
             {
-                await MoveMessageToErrorQueue(messageId, transportMessage, transactionContext, GetErrorDescriptionFor(messageId), GetErrorDescriptionFor(messageId, brief: true));
+                // if we don't have 2nd level retries, just get the message out of the way
+                if (!_simpleRetryStrategySettings.SecondLevelRetriesEnabled)
+                {
+                    var aggregateException = GetAggregateException(messageId);
+                    await MoveMessageToErrorQueue(context.Load<OriginalTransportMessage>(), transactionContext, aggregateException).ConfigureAwait(false);
+                    _errorTracker.CleanUp(messageId);
+                    return;
+                }
 
-                RemoveErrorTracking(messageId);
+                // change the identifier to track by to perform this 2nd level of delivery attempts
+                var secondLevelMessageId = GetSecondLevelMessageId(messageId);
 
+                if (_errorTracker.HasFailedTooManyTimes(secondLevelMessageId))
+                {
+                    var aggregateException = GetAggregateException(messageId, secondLevelMessageId);
+                    await MoveMessageToErrorQueue(context.Load<OriginalTransportMessage>(), transactionContext, aggregateException).ConfigureAwait(false);
+                    _errorTracker.CleanUp(messageId);
+                    _errorTracker.CleanUp(secondLevelMessageId);
+                    return;
+                }
+
+                context.Save(DispatchAsFailedMessageKey, true);
+
+                await DispatchWithTrackerIdentifier(next, secondLevelMessageId, transactionContext, messageId, secondLevelMessageId).ConfigureAwait(false);
                 return;
             }
 
+            await DispatchWithTrackerIdentifier(next, messageId, transactionContext, messageId).ConfigureAwait(false);
+        }
+
+        AggregateException GetAggregateException(params string[] ids)
+        {
+            var exceptions = ids.SelectMany(_errorTracker.GetExceptions).ToArray();
+
+            return new AggregateException($"{exceptions.Length} unhandled exceptions", exceptions);
+        }
+
+        static string GetSecondLevelMessageId(string messageId)
+        {
+            return messageId + "-2nd-level";
+        }
+
+        async Task DispatchWithTrackerIdentifier(Func<Task> next, string identifierToTrackMessageBy, ITransactionContext transactionContext, string messageId, string secondLevelMessageId = null)
+        {
             try
             {
-                await next();
+                await next().ConfigureAwait(false);
+
+                await transactionContext.Commit().ConfigureAwait(false);
+
+                _errorTracker.CleanUp(messageId);
+
+                if (secondLevelMessageId != null)
+                {
+                    _errorTracker.CleanUp(secondLevelMessageId);
+                }
             }
             catch (Exception exception)
             {
-                var errorTracking = _trackedErrors.AddOrUpdate(messageId,
-                    id => new ErrorTracking(exception),
-                    (id, tracking) => tracking.AddError(exception));
-
-                _log.Warn("Unhandled exception {0} while handling message with ID {1}: {2}",
-                    errorTracking.Errors.Count(), messageId, exception);
+                _errorTracker.RegisterError(identifierToTrackMessageBy, exception);
 
                 transactionContext.Abort();
             }
         }
 
-        void RemoveErrorTracking(string messageId)
+        async Task MoveMessageToErrorQueue(OriginalTransportMessage originalTransportMessage, ITransactionContext transactionContext, Exception exception)
         {
-            ErrorTracking dummy;
-            _trackedErrors.TryRemove(messageId, out dummy);
-        }
+            var transportMessage = originalTransportMessage.TransportMessage;
 
-        /// <summary>
-        /// Initializes the step, starting the background task that cleans up old tracked errors
-        /// </summary>
-        public void Initialize()
-        {
-            _cleanupOldTrackedErrorsTask.Start();
-        }
-
-        async Task CleanupOldTrackedErrors()
-        {
-            ErrorTracking _;
-
-            _trackedErrors
-                .ToList()
-                .Where(e => e.Value.ElapsedSinceLastError > TimeSpan.FromMinutes(10))
-                .ForEach(tracking => _trackedErrors.TryRemove(tracking.Key, out _));
-        }
-
-        string GetErrorDescriptionFor(string messageId, bool brief = false)
-        {
-            ErrorTracking errorTracking;
-
-            if (!_trackedErrors.TryGetValue(messageId, out errorTracking))
-            {
-                return "Could not get error details for the message";
-            }
-
-            if (brief)
-            {
-                return string.Format("{0} unhandled exceptions", errorTracking.Errors.Count());
-            }
-
-            var fullExceptionInfo = string.Join(Environment.NewLine, errorTracking.Errors.Select(e => string.Format("{0}: {1}", e.Time, e.Exception)));
-
-            return string.Format("{0} unhandled exceptions: {1}", errorTracking.Errors.Count(), fullExceptionInfo);
-        }
-
-        async Task MoveMessageToErrorQueue(string messageId, TransportMessage transportMessage, ITransactionContext transactionContext, string errorDescription, string shortErrorDescription = null)
-        {
-            var headers = transportMessage.Headers;
-
-            headers[Headers.ErrorDetails] = errorDescription;
-            headers[Headers.SourceQueue] = _transport.Address;
-
-            var moveToErrorQueueFailed = false;
-            var errorQueueAddress = _simpleRetryStrategySettings.ErrorQueueAddress;
-
-            try
-            {
-                _log.Error("Moving message with ID {0} to error queue '{1}' - reason: {2}", messageId, errorQueueAddress, shortErrorDescription);
-
-                await _transport.Send(errorQueueAddress, transportMessage, transactionContext);
-            }
-            catch (Exception exception)
-            {
-                _log.Error(exception, "Could not move message with ID {0} to error queue '{1}' - will pause {2} to avoid thrashing",
-                    messageId, errorQueueAddress, MoveToErrorQueueFailedPause);
-
-                moveToErrorQueueFailed = true;
-            }
-
-            // if we can't move to error queue, we need to avoid thrashing over and over
-            if (moveToErrorQueueFailed)
-            {
-                await Task.Delay(MoveToErrorQueueFailedPause);
-            }
-        }
-
-        bool HasFailedTooManyTimes(string messageId)
-        {
-            ErrorTracking existingTracking;
-            var hasTrackingForThisMessage = _trackedErrors.TryGetValue(messageId, out existingTracking);
-
-            if (!hasTrackingForThisMessage) return false;
-
-            var hasFailedTooManyTimes = existingTracking.ErrorCount >= _simpleRetryStrategySettings.MaxDeliveryAttempts;
-
-            return hasFailedTooManyTimes;
-        }
-
-        class ErrorTracking
-        {
-            readonly ConcurrentQueue<CaughtException> _caughtExceptions = new ConcurrentQueue<CaughtException>();
-
-            public ErrorTracking(Exception exception)
-            {
-                AddError(exception);
-            }
-
-            public int ErrorCount
-            {
-                get { return _caughtExceptions.Count; }
-            }
-
-            public IEnumerable<CaughtException> Errors
-            {
-                get { return _caughtExceptions; }
-            }
-
-            public ErrorTracking AddError(Exception caughtException)
-            {
-                _caughtExceptions.Enqueue(new CaughtException(caughtException));
-                return this;
-            }
-
-            public TimeSpan ElapsedSinceLastError
-            {
-                get
-                {
-                    var timeOfMostRecentError = _caughtExceptions.Max(e => e.Time);
-
-                    var elapsedSinceLastError = DateTime.UtcNow - timeOfMostRecentError;
-
-                    return elapsedSinceLastError;
-                }
-            }
-        }
-
-        class CaughtException
-        {
-            public CaughtException(Exception exception)
-            {
-                Exception = exception;
-                Time = DateTime.UtcNow;
-            }
-
-            public Exception Exception { get; set; }
-            public DateTime Time { get; set; }
-        }
-
-        public void Dispose()
-        {
-            Dispose(true);
-        }
-
-        protected virtual void Dispose(bool disposing)
-        {
-            if (_disposed) return;
-
-            try
-            {
-                _cleanupOldTrackedErrorsTask.Dispose();
-            }
-            finally
-            {
-                _disposed = true;
-            }
+            await _errorHandler.HandlePoisonMessage(transportMessage, transactionContext, exception).ConfigureAwait(false);
         }
     }
 }

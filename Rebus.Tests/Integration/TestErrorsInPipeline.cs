@@ -9,8 +9,12 @@ using Rebus.Config;
 using Rebus.Logging;
 using Rebus.Messages;
 using Rebus.Retry.Simple;
+using Rebus.Tests.Contracts;
+using Rebus.Tests.Contracts.Extensions;
+using Rebus.Tests.Contracts.Utilities;
 using Rebus.Tests.Extensions;
 using Rebus.Transport.InMem;
+#pragma warning disable 1998
 
 namespace Rebus.Tests.Integration
 {
@@ -27,9 +31,8 @@ namespace Rebus.Tests.Integration
             _adapter = new BuiltinHandlerActivator();
             _network = new InMemNetwork(outputEventsToConsole: true);
 
-            RebusLoggerFactory.Current = _listLoggerFactory;
-
             var bus = Configure.With(_adapter)
+                .Logging(l => l.Use(_listLoggerFactory))
                 .Transport(t => t.UseInMemoryTransport(_network, "test"))
                 .Options(o => o.SimpleRetryStrategy("error", 3))
                 .Start();
@@ -63,7 +66,8 @@ namespace Rebus.Tests.Integration
 
             var errorLogLine = loggedErrors.Single(e => e.Level == LogLevel.Error);
 
-            Assert.That(errorLogLine.Text, Contains.Substring(string.Format("Received message with empty or absent '{0}' header", Headers.MessageId)));
+            Assert.That(errorLogLine.Text, Contains.Substring(
+                $"Received message with empty or absent '{Headers.MessageId}' header"));
         }
 
         [Test]
@@ -96,7 +100,8 @@ namespace Rebus.Tests.Integration
 
             var errorLogLine = loggedErrors.Single(e => e.Level == LogLevel.Error);
 
-            Assert.That(errorLogLine.Text, Contains.Substring(string.Format("Moving message with ID {0} to error queue 'error'", messageId)));
+            Assert.That(errorLogLine.Text, Contains.Substring(
+                $@"Moving message with ID ""{messageId}"" to error queue ""error"""));
         }
 
         void PrintLogs()

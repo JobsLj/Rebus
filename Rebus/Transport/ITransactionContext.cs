@@ -37,10 +37,15 @@ namespace Rebus.Transport
         /// Registers a listener to be called after the transaction is over
         /// </summary>
         void OnDisposed(Action disposedAction);
-   
+
         /// <summary>
         /// Signals that something is wrong and the queue transaction must be aborted
         /// </summary>
         void Abort();
+
+        /// <summary>
+        /// Executes commit actions enlisted in the transaction with <see cref="OnCommitted"/>
+        /// </summary>
+        Task Commit();
     }
 }

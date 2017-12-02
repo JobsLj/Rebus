@@ -25,71 +25,75 @@ namespace Rebus.Config
             _injectionist = injectionist;
         }
 
+        internal StandardConfigurer<TService> GetConfigurer<TService>()
+        {
+            return new StandardConfigurer<TService>(_injectionist, _options);
+        }
+
         /// <summary>
         /// Configures the number of workers to start competing over the input queue
         /// </summary>
-        public OptionsConfigurer SetNumberOfWorkers(int numberOfWorkers)
+        public void SetNumberOfWorkers(int numberOfWorkers)
         {
             _options.NumberOfWorkers = numberOfWorkers;
-            return this;
         }
 
         /// <summary>
         /// Configures the total degree of parallelism allowed. This will be the maximum number of parallel potentially asynchrounous operations that can be active,
         /// regardless of the number of workers
         /// </summary>
-        public OptionsConfigurer SetMaxParallelism(int maxParallelism)
+        public void SetMaxParallelism(int maxParallelism)
         {
             _options.MaxParallelism = maxParallelism;
-            return this;
         }
 
         /// <summary>
-        /// Configures Rebus to use another endpoint as the timeout manager
+        /// Configures the maximum timeout for workers to finish running active handlers after being signaled to stop.
         /// </summary>
-        public OptionsConfigurer UseExternalTimeoutManager(string timeoutManagerAddress)
+        public void SetWorkerShutdownTimeout(TimeSpan timeout)
         {
-            if (string.IsNullOrWhiteSpace(timeoutManagerAddress))
-            {
-                throw new ArgumentException(string.Format("Cannot use '{0}' as an external timeout manager address!", timeoutManagerAddress), "timeoutManagerAddress");
-            }
+            _options.WorkerShutdownTimeout = timeout;
+        }
 
-            if (!string.IsNullOrWhiteSpace(_options.ExternalTimeoutManagerAddressOrNull))
-            {
-                throw new InvalidOperationException(string.Format("Cannot set external timeout manager address to '{0}' because it has already been set to '{1}' - please set it only once!  (this operation COULD have been accepted, but it is probably an indication of an error in your configuration code that this value is configured twice, so we figured it was best to let you know)", 
-                    timeoutManagerAddress, _options.ExternalTimeoutManagerAddressOrNull));
-            }
-
-            _injectionist.Register<ITimeoutManager>(c => new ThrowingTimeoutManager());
-            _options.ExternalTimeoutManagerAddressOrNull = timeoutManagerAddress;
-            
-            return this;
+        /// <summary>
+        /// Configures the interval between polling the endpoint's configured <see cref="ITimeoutManager"/> for due timeouts.
+        /// Defaults to <see cref="Options.DefaultDueTimeoutsPollInterval"/>
+        /// </summary>
+        public void SetDueTimeoutsPollInteval(TimeSpan dueTimeoutsPollInterval)
+        {
+            _options.DueTimeoutsPollInterval = dueTimeoutsPollInterval;
         }
 
         /// <summary>
         /// Registers the given factory function as a resolver of the given primary implementation of the <typeparamref name="TService"/> service
         /// </summary>
-        public void Register<TService>(Func<IResolutionContext, TService> resolverMethod)
+        public void Register<TService>(Func<IResolutionContext, TService> resolverMethod, string description = null)
         {
-            _injectionist.Register(resolverMethod);
+            _injectionist.Register(resolverMethod, description);
+        }
+
+        /// <summary>
+        /// Gets whether a primary implementation resolver has been registered for the <typeparamref name="TService"/> service
+        /// </summary>
+        public bool Has<TService>()
+        {
+            return _injectionist.Has<TService>();
         }
 
         /// <summary>
         /// Registers the given factory function as a resolve of the given decorator of the <typeparamref name="TService"/> service
         /// </summary>
-        public void Decorate<TService>(Func<IResolutionContext, TService> resolverMethod)
+        public void Decorate<TService>(Func<IResolutionContext, TService> resolverMethod, string description = null)
         {
-            _injectionist.Decorate(resolverMethod);
+            _injectionist.Decorate(resolverMethod, description);
         }
 
         /// <summary>
         /// Outputs the layout of the send and receive pipelines to the log
         /// </summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public OptionsConfigurer LogPipeline(bool verbose = false)
+        public void LogPipeline(bool verbose = false)
         {
-            var logger = RebusLoggerFactory.Current.GetCurrentClassLogger();
-
             // when the pipeline is resolved, we hook ourselves in and log it!
             _injectionist.ResolveRequested += serviceType =>
             {
@@ -98,6 +102,7 @@ namespace Rebus.Config
                 _injectionist.Decorate(c =>
                 {
                     var pipeline = c.Get<IPipeline>();
+                    var logger = c.Get<IRebusLoggerFactory>().GetLogger<OptionsConfigurer>();
 
                     var receivePipeline = pipeline.ReceivePipeline();
                     var sendPipeline = pipeline.SendPipeline();
@@ -107,10 +112,10 @@ namespace Rebus.Config
 Message pipelines
 ------------------------------------------------------------------------------
 Send pipeline:
-{0}
+{sendPipeline}
 
 Receive pipeline:
-{1}
+{receivePipeline}
 ------------------------------------------------------------------------------
 ", Format(sendPipeline, verbose), Format(receivePipeline, verbose));
 
@@ -118,17 +123,15 @@ Receive pipeline:
                     return pipeline;
                 });
             };
-            
-            return this;
         }
 
-        string Format(IEnumerable<IStep> pipeline, bool verbose)
+        static string Format(IEnumerable<IStep> pipeline, bool verbose)
         {
             return string.Join(Environment.NewLine,
                 pipeline.Select((step, i) =>
                 {
                     var stepType = step.GetType().FullName;
-                    var stepString = string.Format("    {0}", stepType);
+                    var stepString = $"    {stepType}";
 
                     if (verbose)
                     {
@@ -146,16 +149,15 @@ Receive pipeline:
                 }));
         }
 
-        string GetDocsOrNull(IStep step)
+        static string GetDocsOrNull(IStep step)
         {
             var docsAttribute = step.GetType()
+                .GetTypeInfo()
                 .GetCustomAttributes()
                 .OfType<StepDocumentationAttribute>()
                 .FirstOrDefault();
 
-            return docsAttribute != null
-                ? docsAttribute.Text
-                : null;
+            return docsAttribute?.Text;
         }
     }
 }

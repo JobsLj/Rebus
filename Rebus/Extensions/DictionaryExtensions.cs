@@ -12,6 +12,24 @@ namespace Rebus.Extensions
     public static class DictionaryExtensions
     {
         /// <summary>
+        /// Returns a new dictionary that contains all key-value pairs from both dictionaries. If the same key is present the value from <paramref name="otherDictionary"/> takes precedence
+        /// </summary>
+        public static Dictionary<TKey, TValue> MergedWith<TKey, TValue>(this IDictionary<TKey, TValue> dictionary, IDictionary<TKey, TValue> otherDictionary)
+        {
+            if (dictionary == null) throw new ArgumentNullException(nameof(dictionary));
+            if (otherDictionary == null) throw new ArgumentNullException(nameof(otherDictionary));
+
+            var result = new Dictionary<TKey, TValue>(dictionary);
+
+            foreach (var kvp in otherDictionary)
+            {
+                result[kvp.Key] = kvp.Value;
+            }
+
+            return result;
+        }
+
+        /// <summary>
         /// Returns a new dictionary with the same key-value pairs as the target
         /// </summary>
         public static Dictionary<string, string> Clone(this Dictionary<string, string> dictionary)
@@ -25,13 +43,9 @@ namespace Rebus.Extensions
         /// </summary>
         public static string GetValue(this Dictionary<string, string> dictionary, string key)
         {
-            string value;
+            if (dictionary.TryGetValue(key, out var value)) return value;
 
-            if (dictionary.TryGetValue(key, out value))
-                return value;
-
-            throw new KeyNotFoundException(string.Format("Could not find the key '{0}' - have the following keys only: {1}",
-                key, string.Join(", ", dictionary.Keys.Select(k => string.Format("'{0}'", k)))));
+            throw new KeyNotFoundException($"Could not find the key '{key}' - have the following keys only: {string.Join(", ", dictionary.Keys.Select(k => $"'{k}'"))}");
         }
 
         /// <summary>
@@ -39,9 +53,7 @@ namespace Rebus.Extensions
         /// </summary>
         public static string GetValueOrNull(this Dictionary<string, string> dictionary, string key)
         {
-            string value;
-
-            return dictionary.TryGetValue(key, out value)
+            return dictionary.TryGetValue(key, out var value)
                 ? value
                 : null;
         }
@@ -52,8 +64,7 @@ namespace Rebus.Extensions
         /// </summary>
         public static TItem GetOrAdd<TItem, TBase>(this Dictionary<string, TBase> dictionary, string key, Func<TItem> newItemFactory) where TItem : TBase
         {
-            TBase item;
-            if (dictionary.TryGetValue(key, out item)) return (TItem)item;
+            if (dictionary.TryGetValue(key, out var item)) return (TItem)item;
 
             var newItem = newItemFactory();
             dictionary[key] = newItem;
@@ -65,10 +76,9 @@ namespace Rebus.Extensions
         /// </summary>
         public static async Task<TItem> GetOrAddAsync<TItem, TBase>(this Dictionary<string, TBase> dictionary, string key, Func<Task<TItem>> newItemFactory) where TItem : TBase
         {
-            TBase item;
-            if (dictionary.TryGetValue(key, out item)) return (TItem)item;
+            if (dictionary.TryGetValue(key, out var item)) return (TItem)item;
 
-            var newItem = await newItemFactory();
+            var newItem = await newItemFactory().ConfigureAwait(false);
             dictionary[key] = newItem;
             return newItem;
         }
@@ -87,17 +97,14 @@ namespace Rebus.Extensions
         /// </summary>
         public static T GetOrThrow<T>(this IDictionary<string, object> dictionary, string key)
         {
-            object item;
-
-            if (!dictionary.TryGetValue(key, out item))
+            if (!dictionary.TryGetValue(key, out var item))
             {
-                throw new KeyNotFoundException(string.Format("Could not find an item with the key '{0}'", key));
+                throw new KeyNotFoundException($"Could not find an item with the key '{key}'");
             }
 
             if (!(item is T))
             {
-                throw new ArgumentException(string.Format("Found item with key '{0}' but it was a {1} and not of type {2} as expected",
-                    key, item.GetType(), typeof(T)));
+                throw new ArgumentException($"Found item with key '{key}' but it was a {item.GetType()} and not of type {typeof (T)} as expected");
             }
 
             return (T)item;
@@ -109,17 +116,15 @@ namespace Rebus.Extensions
         /// </summary>
         public static T GetOrNull<T>(this Dictionary<string, object> dictionary, string key) where T : class
         {
-            object item;
-
-            if (!dictionary.TryGetValue(key, out item))
+            if (!dictionary.TryGetValue(key, out var item))
             {
                 return default(T);
             }
 
             if (!(item is T))
             {
-                throw new ArgumentException(string.Format("Found item with key '{0}' but it was a {1} and not of type {2} as expected",
-                    key, item.GetType(), typeof(T)));
+                throw new ArgumentException(
+                    $"Found item with key '{key}' but it was a {item.GetType()} and not of type {typeof (T)} as expected");
             }
 
             return (T)item;

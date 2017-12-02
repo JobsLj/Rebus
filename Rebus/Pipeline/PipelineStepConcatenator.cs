@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 
 namespace Rebus.Pipeline
@@ -20,6 +21,7 @@ namespace Rebus.Pipeline
         /// <param name="pipeline"></param>
         public PipelineStepConcatenator(IPipeline pipeline)
         {
+            if (pipeline == null) throw new ArgumentNullException(nameof(pipeline));
             _pipeline = pipeline;
         }
 
@@ -28,6 +30,7 @@ namespace Rebus.Pipeline
         /// </summary>
         public PipelineStepConcatenator OnSend(IOutgoingStep step, PipelineAbsolutePosition position)
         {
+            if (step == null) throw new ArgumentNullException(nameof(step));
             if (position == PipelineAbsolutePosition.Front)
             {
                 _outgoingFrontSteps.Add(step);
@@ -44,6 +47,7 @@ namespace Rebus.Pipeline
         /// </summary>
         public PipelineStepConcatenator OnReceive(IIncomingStep step, PipelineAbsolutePosition position)
         {
+            if (step == null) throw new ArgumentNullException(nameof(step));
             if (position == PipelineAbsolutePosition.Front)
             {
                 _incomingFrontSteps.Add(step);
@@ -58,21 +62,23 @@ namespace Rebus.Pipeline
         /// <summary>
         /// Gets the send pipeline with front and back steps concatenated
         /// </summary>
-        public IEnumerable<IOutgoingStep> SendPipeline()
+        public IOutgoingStep[] SendPipeline()
         {
             return _outgoingFrontSteps
                 .Concat(_pipeline.SendPipeline())
-                .Concat(_outgoingBackSteps);
+                .Concat(_outgoingBackSteps)
+                .ToArray();
         }
 
         /// <summary>
         /// Gets the receive pipeline with front and back steps concatenated
         /// </summary>
-        public IEnumerable<IIncomingStep> ReceivePipeline()
+        public IIncomingStep[] ReceivePipeline()
         {
             return _incomingFrontSteps
                 .Concat(_pipeline.ReceivePipeline())
-                .Concat(_incomingBackSteps);
+                .Concat(_incomingBackSteps)
+                .ToArray();
         }
     }
 }

@@ -1,8 +1,13 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq.Expressions;
+using System.Reflection;
+using System.Threading.Tasks;
 using Rebus.Exceptions;
+using Rebus.Pipeline;
 using Rebus.Reflection;
+#pragma warning disable 1998
 
 namespace Rebus.Sagas
 {
@@ -12,6 +17,30 @@ namespace Rebus.Sagas
     /// </summary>
     public abstract class Saga
     {
+        static readonly ConcurrentDictionary<Type, bool> CachedUserHasOverriddenConflictResolutionMethod = new ConcurrentDictionary<Type, bool>();
+
+        /// <summary>
+        /// Checks whether the <see cref="Saga{TSagaData}.ResolveConflict"/> method is defined in <see cref="Saga{TSagaData}"/>, returning
+        /// true if it is NOT - because that means that the user has overridden the method and in this particular saga type can resolve conflicts. 
+        /// </summary>
+        internal bool UserHasOverriddenConflictResolutionMethod()
+        {
+            return CachedUserHasOverriddenConflictResolutionMethod
+                .GetOrAdd(GetType(), type =>
+                {
+                    var typeDeclaringTheConflictResolutionMethod = GetType()
+                        .GetMethod("ResolveConflict", BindingFlags.Instance | BindingFlags.NonPublic).DeclaringType;
+
+                    if (typeDeclaringTheConflictResolutionMethod == null)
+                    {
+                        return false;
+                    }
+
+                    return !(typeDeclaringTheConflictResolutionMethod.GetTypeInfo().IsGenericType
+                             && typeDeclaringTheConflictResolutionMethod.GetTypeInfo().GetGenericTypeDefinition() == typeof(Saga<>));
+                });
+        }
+
         internal IEnumerable<CorrelationProperty> GetCorrelationProperties()
         {
             return new List<CorrelationProperty>();
@@ -20,10 +49,14 @@ namespace Rebus.Sagas
         internal abstract IEnumerable<CorrelationProperty> GenerateCorrelationProperties();
 
         internal abstract Type GetSagaDataType();
-        
+
         internal abstract ISagaData CreateNewSagaData();
 
         internal bool WasMarkedAsComplete { get; set; }
+
+        internal bool WasMarkedAsUnchanged { get; set; }
+
+        internal bool HoldsNewSagaDataInstance { get; set; }
 
         /// <summary>
         /// Marks the current saga instance as completed, which means that it is either a) deleted from persistent storage in case
@@ -33,6 +66,22 @@ namespace Rebus.Sagas
         {
             WasMarkedAsComplete = true;
         }
+
+        /// <summary>
+        /// Marks the current saga instance as unchanged, causing any changes made to it to be ignored. Its revision will NOT be
+        /// incremented
+        /// </summary>
+        protected virtual void MarkAsUnchanged()
+        {
+            WasMarkedAsUnchanged = true;
+        }
+
+        /// <summary>
+        /// Gets whether the saga data instance is new
+        /// </summary>
+        protected bool IsNew => HoldsNewSagaDataInstance;
+
+        internal abstract Task InvokeConflictResolution(ISagaData otherSagaData);
     }
 
     /// <summary>
@@ -55,13 +104,26 @@ namespace Rebus.Sagas
         /// </summary>
         protected abstract void CorrelateMessages(ICorrelationConfig<TSagaData> config);
 
-        internal override IEnumerable<CorrelationProperty> GenerateCorrelationProperties()
+        internal sealed override IEnumerable<CorrelationProperty> GenerateCorrelationProperties()
         {
             var configuration = new CorrelationConfiguration(GetType());
-            
+
             CorrelateMessages(configuration);
-            
+
             return configuration.GetCorrelationProperties();
+        }
+
+        internal sealed override async Task InvokeConflictResolution(ISagaData otherSagaData)
+        {
+            await ResolveConflict((TSagaData)otherSagaData).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Override this to be given an opportunity to resolve the conflict when a <see cref="ConcurrencyException"/> occurs on an update.
+        /// If a conflict cannot be resolved, feel free to bail out by throwing an exception.
+        /// </summary>
+        protected virtual async Task ResolveConflict(TSagaData otherSagaData)
+        {
         }
 
         class CorrelationConfiguration : ICorrelationConfig<TSagaData>
@@ -74,12 +136,12 @@ namespace Rebus.Sagas
             }
 
             readonly List<CorrelationProperty> _correlationProperties = new List<CorrelationProperty>();
-            
+
             public void Correlate<TMessage>(Func<TMessage, object> messageValueExtractorFunction, Expression<Func<TSagaData, object>> sagaDataValueExpression)
             {
                 var propertyName = Reflect.Path(sagaDataValueExpression);
-                
-                Func<object, object> neutralMessageValueExtractor = message =>
+
+                object NeutralMessageValueExtractor(IMessageContext context, object message)
                 {
                     try
                     {
@@ -87,11 +149,51 @@ namespace Rebus.Sagas
                     }
                     catch (Exception exception)
                     {
-                        throw new RebusApplicationException(string.Format("Could not extract correlation value from message {0}", typeof(TMessage)), exception);
+                        throw new RebusApplicationException(exception, $"Could not extract correlation value from message {typeof(TMessage)}");
                     }
-                };
+                }
 
-                _correlationProperties.Add(new CorrelationProperty(typeof(TMessage), neutralMessageValueExtractor, typeof(TSagaData), propertyName, _sagaType));
+                _correlationProperties.Add(new CorrelationProperty(typeof(TMessage), NeutralMessageValueExtractor, typeof(TSagaData), propertyName, _sagaType));
+            }
+
+            public void CorrelateHeader<TMessage>(string headerKey, Expression<Func<TSagaData, object>> sagaDataValueExpression)
+            {
+                var propertyName = Reflect.Path(sagaDataValueExpression);
+
+                object NeutralMessageValueExtractor(IMessageContext context, object message)
+                {
+                    try
+                    {
+                        return context.Headers.TryGetValue(headerKey, out var headerValue)
+                            ? headerValue
+                            : null;
+                    }
+                    catch (Exception exception)
+                    {
+                        throw new RebusApplicationException(exception, $"Could not extract correlation value from message {typeof(TMessage)}'s header key '{headerKey}'");
+                    }
+                }
+
+                _correlationProperties.Add(new CorrelationProperty(typeof(TMessage), NeutralMessageValueExtractor, typeof(TSagaData), propertyName, _sagaType));
+            }
+
+            public void CorrelateContext<TMessage>(Func<IMessageContext, object> contextValueExtractorFunction, Expression<Func<TSagaData, object>> sagaDataValueExpression)
+            {
+                var propertyName = Reflect.Path(sagaDataValueExpression);
+
+                object NeutralMessageValueExtractor(IMessageContext context, object message)
+                {
+                    try
+                    {
+                        return contextValueExtractorFunction(context);
+                    }
+                    catch (Exception exception)
+                    {
+                        throw new RebusApplicationException(exception, $"Could not extract correlation value from message {typeof(TMessage)}'s message context");
+                    }
+                }
+
+                _correlationProperties.Add(new CorrelationProperty(typeof(TMessage), NeutralMessageValueExtractor, typeof(TSagaData), propertyName, _sagaType));
             }
 
             public IEnumerable<CorrelationProperty> GetCorrelationProperties()
@@ -102,15 +204,19 @@ namespace Rebus.Sagas
 
         internal override Type GetSagaDataType()
         {
-            return typeof (TSagaData);
+            return typeof(TSagaData);
         }
 
         internal override ISagaData CreateNewSagaData()
         {
-            return new TSagaData
+            var newSagaData = new TSagaData
             {
                 Id = Guid.NewGuid()
             };
+
+            HoldsNewSagaDataInstance = true;
+
+            return newSagaData;
         }
     }
 }

@@ -7,10 +7,12 @@ using Rebus.Activation;
 using Rebus.Bus;
 using Rebus.Config;
 using Rebus.Handlers;
-using Rebus.Logging;
 using Rebus.Messages;
+using Rebus.Persistence.InMem;
 using Rebus.Sagas;
+using Rebus.Tests.Contracts;
 using Rebus.Transport.InMem;
+#pragma warning disable 1998
 
 namespace Rebus.Tests.Integration
 {
@@ -28,13 +30,14 @@ namespace Rebus.Tests.Integration
             _handlerActivator.Register(() => new MySaga(_recordedCalls));
 
             _bus = Configure.With(_handlerActivator)
-                .Logging(l => l.Console(minLevel: LogLevel.Debug))
+                .Logging(l => l.Console())
                 .Transport(t => t.UseInMemoryTransport(new InMemNetwork(true), "test.sagas.input"))
                 .Options(o =>
                 {
                     o.SetNumberOfWorkers(1);
                     o.SetMaxParallelism(1);
                 })
+                .Sagas(s => s.StoreInMemory())
                 .Start();
 
             Using(_bus);
@@ -150,7 +153,7 @@ namespace Rebus.Tests.Integration
 
                 Data.ProcessedMessages[type]++;
 
-                _recordedCalls.Add(string.Format("{0}:{1}", correlationId, type.Name));
+                _recordedCalls.Add($"{correlationId}:{type.Name}");
             }
         }
 
@@ -166,7 +169,7 @@ namespace Rebus.Tests.Integration
 
             public string CorrelationId { get; set; }
 
-            public Dictionary<Type, int> ProcessedMessages { get; set; }
+            public Dictionary<Type, int> ProcessedMessages { get; }
         }
     }
 }

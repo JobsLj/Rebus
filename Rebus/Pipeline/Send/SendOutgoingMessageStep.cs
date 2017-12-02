@@ -16,21 +16,17 @@ namespace Rebus.Pipeline.Send
     [StepDocumentation("Final step that uses the current transport to send the transport message found in the context to all addresses found by looking up the DestinationAddress object from the context.")]
     public class SendOutgoingMessageStep : IOutgoingStep
     {
-        static ILog _log;
-
-        static SendOutgoingMessageStep()
-        {
-            RebusLoggerFactory.Changed += f => _log = f.GetCurrentClassLogger();
-        }
-
         readonly ITransport _transport;
+        readonly ILog _log;
 
         /// <summary>
         /// Constructs the step, using the specified transport to send the messages
         /// </summary>
-        public SendOutgoingMessageStep(ITransport transport)
+        public SendOutgoingMessageStep(ITransport transport, IRebusLoggerFactory rebusLoggerFactory)
         {
-            _transport = transport;
+            if (rebusLoggerFactory == null) throw new ArgumentNullException(nameof(rebusLoggerFactory));
+            _transport = transport ?? throw new ArgumentNullException(nameof(transport));
+            _log = rebusLoggerFactory.GetLogger<SendOutgoingMessageStep>();
         }
 
         /// <summary>
@@ -46,24 +42,22 @@ namespace Rebus.Pipeline.Send
 
             var hasOneOrMoreDestinations = destinationAddressesList.Any();
 
-            _log.Debug("Sending {0} -> {1}",
+            _log.Debug("Sending {messageBody} -> {queueNames}",
                 logicalMessage.Body ?? "<empty message>",
                 hasOneOrMoreDestinations ? string.Join(";", destinationAddressesList) : "<no destinations>");
 
-            await Send(destinationAddressesList, transportMessage, currentTransactionContext);
+            await Send(destinationAddressesList, transportMessage, currentTransactionContext).ConfigureAwait(false);
 
-            await next();
+            await next().ConfigureAwait(false);
         }
 
-        async Task Send(IEnumerable<string> destinationAddressesList,
-            TransportMessage transportMessage,
-            ITransactionContext currentTransactionContext)
+        async Task Send(List<string> destinationAddressesList, TransportMessage transportMessage, ITransactionContext currentTransactionContext)
         {
             var sendTasks = destinationAddressesList
-                .Select(address => _transport.Send(address, transportMessage, currentTransactionContext))
+                .Select(async address => await _transport.Send(address, transportMessage, currentTransactionContext).ConfigureAwait(false))
                 .ToArray();
 
-            await Task.WhenAll(sendTasks);
+            await Task.WhenAll(sendTasks).ConfigureAwait(false);
         }
     }
 }

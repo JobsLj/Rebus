@@ -1,42 +1,35 @@
 ﻿using System;
+#if NET45
 using System.Runtime.Serialization;
+#endif
 
 namespace Rebus.Exceptions
 {
     /// <summary>
     /// Generic application exception to use when something bad happens that is pretty unexpected and should be taken seriously
     /// </summary>
+#if NET45
     [Serializable]
+#endif
     public class RebusApplicationException : Exception
     {
         /// <summary>
         /// Constructs the exception with the given message
         /// </summary>
-        public RebusApplicationException(string message, params object[] objs)
-            :base(SafeStringFormat(message, objs))
+        public RebusApplicationException(string message)
+            :base(message)
         {
         }
 
         /// <summary>
         /// Constructs the exception with the given message and inner exception
         /// </summary>
-        public RebusApplicationException(Exception innerException, string message, params object[] objs)
-            :base(SafeStringFormat(message, objs), innerException)
+        public RebusApplicationException(Exception innerException, string message)
+            :base(message, innerException)
         {
         }
 
-        static string SafeStringFormat(string message, object[] objs)
-        {
-            try
-            {
-                return string.Format(message, objs);
-            }
-            catch
-            {
-                return message;
-            }
-        }
-
+#if NET45
         /// <summary>
         /// Happy cross-domain serialization!
         /// </summary>
@@ -44,5 +37,6 @@ namespace Rebus.Exceptions
             :base(info, context)
         {
         }
+#endif
     }
 }

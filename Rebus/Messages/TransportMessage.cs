@@ -13,8 +13,8 @@ namespace Rebus.Messages
         /// </summary>
         public TransportMessage(Dictionary<string, string> headers, byte[] body)
         {
-            if (headers == null) throw new ArgumentNullException("headers");
-            if (body == null) throw new ArgumentNullException("body");
+            if (headers == null) throw new ArgumentNullException(nameof(headers));
+            if (body == null) throw new ArgumentNullException(nameof(body));
             Headers = headers;
             Body = body;
         }
@@ -22,11 +22,11 @@ namespace Rebus.Messages
         /// <summary>
         /// Gets the headers of this message
         /// </summary>
-        public Dictionary<string, string> Headers { get; private set; }
+        public Dictionary<string, string> Headers { get; }
 
         /// <summary>
         /// Gets the wrapped body data of this message
         /// </summary>
-        public byte[] Body { get; private set; }
+        public byte[] Body { get; }
     }
 }

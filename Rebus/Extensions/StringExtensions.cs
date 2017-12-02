@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
@@ -7,6 +6,18 @@ namespace Rebus.Extensions
 {
     static class StringExtensions
     {
+        public static string Truncate(this string text, int maxLength, string placeholder = "(...)")
+        {
+            if (text.Length <= maxLength) return text;
+            if (placeholder.Length >= maxLength) return placeholder.Substring(0, maxLength);
+
+            var lengthOfTextToKeep = maxLength - placeholder.Length;
+
+            if (lengthOfTextToKeep <= 0) return placeholder;
+
+            return string.Concat(text.Substring(0, lengthOfTextToKeep), placeholder);
+        }
+
         public static string WrappedAt(this string str, int width)
         {
             var twoLineBreaks = Environment.NewLine + Environment.NewLine;

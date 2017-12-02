@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -11,105 +12,151 @@ namespace Rebus.Injection
     /// </summary>
     public class Injectionist
     {
-        readonly Dictionary<Type, List<Resolver>> _resolvers = new Dictionary<Type, List<Resolver>>();
+        class Handler
+        {
+            public Handler()
+            {
+                Decorators = new List<Resolver>();
+            }
+
+            public Resolver PrimaryResolver { get; private set; }
+
+            public List<Resolver> Decorators { get; private set; }
+
+            void AddDecorator(Resolver resolver)
+            {
+                Decorators.Insert(0, resolver);
+            }
+
+            public void AddResolver(Resolver resolver)
+            {
+                if (!resolver.IsDecorator)
+                {
+                    AddPrimary(resolver);
+                }
+                else
+                {
+                    AddDecorator(resolver);
+                }
+            }
+
+            void AddPrimary(Resolver resolver)
+            {
+                PrimaryResolver = resolver;
+            }
+        }
+
+        readonly Dictionary<Type, Handler> _resolvers = new Dictionary<Type, Handler>();
 
         /// <summary>
         /// Starts a new resolution context, resolving an instance of the given <typeparamref name="TService"/>
         /// </summary>
-        public TService Get<TService>()
+        public ResolutionResult<TService> Get<TService>()
         {
-            var resolutionContext = new ResolutionContext(_resolvers, serviceType => ResolveRequested(serviceType));
-
-            return resolutionContext.Get<TService>();
+            var resolutionContext = new ResolutionContext(_resolvers, ResolveRequested);
+            var instance = resolutionContext.Get<TService>();
+            return new ResolutionResult<TService>(instance, resolutionContext.TrackedInstances);
         }
 
         /// <summary>
-        /// Registers a factory method that can provide an instance of the primary implementation of <typeparamref name="TService"/>
-        /// </summary>
-        public void Register<TService>(Func<IResolutionContext, TService> resolverMethod)
-        {
-            Register(resolverMethod, isDecorator: false);
-        }
-
-        /// <summary>
-        /// Registers a factory method that can provide a decorator of <typeparamref name="TService"/>
-        /// </summary>
-        public void Decorate<TService>(Func<IResolutionContext, TService> resolverMethod)
-        {
-            Register(resolverMethod, isDecorator: true);
-        }
-
-        void Register<TService>(Func<IResolutionContext, TService> resolverMethod, bool isDecorator)
-        {
-            var key = typeof(TService);
-            if (!_resolvers.ContainsKey(key))
-            {
-                _resolvers.Add(key, new List<Resolver>());
-            }
-
-            var resolverList = _resolvers[key];
-
-            if (!isDecorator)
-            {
-                var existingPrimaryRegistration = resolverList.FirstOrDefault(r => !r.IsDecorator);
-
-                if (existingPrimaryRegistration != null)
-                {
-                    throw new InvalidOperationException(string.Format("Attempted to register {0} as primary implementation of {1}, but a primary registration already exists: {2}",
-                        resolverMethod, typeof(TService), existingPrimaryRegistration));
-                }
-            }
-
-            var resolver = new Resolver<TService>(resolverMethod, isDecorator: isDecorator);
-
-            if (!resolver.IsDecorator)
-            {
-                resolverList.Add(resolver);
-            }
-            else
-            {
-                resolverList.Insert(0, resolver);
-            }
-        }
-
-        /// <summary>
-        /// Event that gets fired when (top level) resolve is called for a type
+        /// Events that is raised when the resolution of a top-level instance is requested
         /// </summary>
         public event Action<Type> ResolveRequested = delegate { };
 
         /// <summary>
-        /// Returns whether there exists a registration for the specified <see cref="TService"/>.
+        /// Registers a factory method that can provide an instance of <typeparamref name="TService"/>. Optionally,
+        /// the supplied <paramref name="description"/> will be used to report more comprehensible errors in case of
+        /// conflicting registrations.
+        /// </summary>
+        public void Register<TService>(Func<IResolutionContext, TService> resolverMethod, string description = null)
+        {
+            Register(resolverMethod, description: description, isDecorator: false);
+        }
+
+        /// <summary>
+        /// Registers a decorator factory method that can provide an instance of <typeparamref name="TService"/> 
+        /// (i.e. the resolver is expected to call <see cref="IResolutionContext.Get{TService}"/> where TService
+        /// is <typeparamref name="TService"/>. Optionally, the supplied <paramref name="description"/> will be used 
+        /// to report more comprehensible errors in case of conflicting registrations.
+        /// </summary>
+        public void Decorate<TService>(Func<IResolutionContext, TService> resolverMethod, string description = null)
+        {
+            Register(resolverMethod, description: description, isDecorator: true);
+        }
+
+        /// <summary>
+        /// Returns whether there exists a registration for the specified <typeparamref name="TService"/>.
         /// </summary>
         public bool Has<TService>(bool primary = true)
         {
+            return ResolverHaveRegistrationFor<TService>(primary, _resolvers);
+        }
+
+        static bool ResolverHaveRegistrationFor<TService>(bool primary, Dictionary<Type, Handler> resolvers)
+        {
             var key = typeof(TService);
-            return _resolvers.ContainsKey(key) 
-                && _resolvers[key].Count(r => !r.IsDecorator) == 1;
+
+            if (!resolvers.ContainsKey(key)) return false;
+
+            var handler = resolvers[key];
+
+            if (handler.PrimaryResolver != null) return true;
+
+            if (!primary && handler.Decorators.Any()) return true;
+
+            return false;
+        }
+
+        void Register<TService>(Func<IResolutionContext, TService> resolverMethod, bool isDecorator, string description)
+        {
+            var handler = GetOrCreateHandler<TService>();
+            var resolver = new Resolver<TService>(resolverMethod, description: description, isDecorator: isDecorator);
+
+            if (!isDecorator)
+            {
+                if (handler.PrimaryResolver != null)
+                {
+                    var message = $"Attempted to register {resolver}, but a primary registration already exists: {handler.PrimaryResolver}";
+
+                    throw new InvalidOperationException(message);
+                }
+            }
+
+            handler.AddResolver(resolver);
+        }
+
+        Handler GetOrCreateHandler<TService>()
+        {
+            Handler handler;
+
+            if (_resolvers.TryGetValue(typeof(TService), out handler)) return handler;
+
+            handler = new Handler();
+            _resolvers[typeof(TService)] = handler;
+
+            return handler;
         }
 
         abstract class Resolver
         {
-            readonly bool _isDecorator;
-
             protected Resolver(bool isDecorator)
             {
-                _isDecorator = isDecorator;
+                IsDecorator = isDecorator;
             }
 
-            public bool IsDecorator
-            {
-                get { return _isDecorator; }
-            }
+            public bool IsDecorator { get; private set; }
         }
 
         class Resolver<TService> : Resolver
         {
             readonly Func<IResolutionContext, TService> _resolver;
+            readonly string _description;
 
-            public Resolver(Func<IResolutionContext, TService> resolver, bool isDecorator)
+            public Resolver(Func<IResolutionContext, TService> resolver, bool isDecorator, string description)
                 : base(isDecorator)
             {
                 _resolver = resolver;
+                _description = description;
             }
 
             public TService InvokeResolver(IResolutionContext context)
@@ -119,39 +166,48 @@ namespace Rebus.Injection
 
             public override string ToString()
             {
-                return string.Format("{0} ({1} {2})",
-                    _resolver,
-                    IsDecorator ? "decorator ->" : "primary ->",
-                    typeof (TService));
+                var role = IsDecorator ? "decorator ->" : "primary ->";
+                var type = typeof(TService);
+
+                return !string.IsNullOrWhiteSpace(_description)
+                    ? $"{role} {type} ({_description})"
+                    : $"{role} {type}";
             }
         }
 
         class ResolutionContext : IResolutionContext
         {
             readonly Dictionary<Type, int> _decoratorDepth = new Dictionary<Type, int>();
-            readonly Dictionary<Type, List<Resolver>> _resolvers;
+            readonly Dictionary<Type, Handler> _resolvers;
             readonly Action<Type> _serviceTypeRequested;
-            readonly Dictionary<Type, Tuple<object, int>> _instances = new Dictionary<Type, Tuple<object, int>>();
-            int _resolutionOrderCounter;
+            readonly Dictionary<Type, object> _instances = new Dictionary<Type, object>();
+            readonly List<object> _resolvedInstances = new List<object>();
 
-            public ResolutionContext(Dictionary<Type, List<Resolver>> resolvers, Action<Type> serviceTypeRequested)
+            public ResolutionContext(Dictionary<Type, Handler> resolvers, Action<Type> serviceTypeRequested)
             {
                 _resolvers = resolvers;
                 _serviceTypeRequested = serviceTypeRequested;
+            }
+
+            public bool Has<TService>(bool primary = true)
+            {
+                return ResolverHaveRegistrationFor<TService>(primary, _resolvers);
             }
 
             public TService Get<TService>()
             {
                 var serviceType = typeof(TService);
 
-                if (_instances.ContainsKey(serviceType))
+                object existingInstance;
+
+                if (_instances.TryGetValue(serviceType, out existingInstance))
                 {
-                    return (TService) _instances[serviceType].Item1;
+                    return (TService)existingInstance;
                 }
 
                 if (!_resolvers.ContainsKey(serviceType))
                 {
-                    throw new ResolutionException("Could not find resolver for {0}", serviceType);
+                    throw new ResolutionException($"Could not find resolver for {serviceType}");
                 }
 
                 if (!_decoratorDepth.ContainsKey(serviceType))
@@ -160,25 +216,36 @@ namespace Rebus.Injection
                     _serviceTypeRequested(serviceType);
                 }
 
-                var resolversForThisType = _resolvers[serviceType];
+                var handlerForThisType = _resolvers[serviceType];
                 var depth = _decoratorDepth[serviceType]++;
 
                 try
                 {
-                    var instance = resolversForThisType
+                    var resolver = handlerForThisType
+                        .Decorators
                         .Cast<Resolver<TService>>()
                         .Skip(depth)
-                        .First()
-                        .InvokeResolver(this);
+                        .FirstOrDefault()
+                                   ?? (Resolver<TService>) handlerForThisType.PrimaryResolver;
 
-                    _instances[serviceType] = new Tuple<object, int>(instance, _resolutionOrderCounter++);
+                    var instance = resolver.InvokeResolver(this);
+
+                    _instances[serviceType] = instance;
+
+                    if (!_resolvedInstances.Contains(instance))
+                    {
+                        _resolvedInstances.Add(instance);
+                    }
 
                     return instance;
                 }
+                catch (ResolutionException)
+                {
+                    throw; //< let this one through
+                }
                 catch (Exception exception)
                 {
-                    throw new ResolutionException(exception, "Could not resolve {0} with decorator depth {1} - registrations: {2}",
-                        serviceType, depth, string.Join("; ", resolversForThisType));
+                    throw new ResolutionException(exception, $"Could not resolve {serviceType} with decorator depth {depth} - registrations: {string.Join("; ", handlerForThisType)}");
                 }
                 finally
                 {
@@ -186,14 +253,7 @@ namespace Rebus.Injection
                 }
             }
 
-            public IEnumerable<T> GetTrackedInstancesOf<T>()
-            {
-                return _instances.Values
-                    .OrderBy(t => t.Item2)  //< order instances by when they were created
-                    .Select(t => t.Item1)
-                    .OfType<T>()
-                    .ToList();
-            }
+            public IEnumerable TrackedInstances => _resolvedInstances.ToList();
         }
     }
 }

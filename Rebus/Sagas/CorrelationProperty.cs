@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Linq;
+using System.Reflection;
+using Rebus.Pipeline;
 
 namespace Rebus.Sagas
 {
@@ -14,7 +16,11 @@ namespace Rebus.Sagas
         static readonly Type[] AllowedCorrelationPropertyTypes =
         {
             typeof (Guid),
+            typeof (bool),
+            typeof (byte),
+            typeof (short),
             typeof (int),
+            typeof (long),
             typeof (string),
         };
 
@@ -26,54 +32,84 @@ namespace Rebus.Sagas
         /// <param name="sagaDataType">Specifies the type of saga data that this property can correlate to</param>
         /// <param name="propertyName">Specifies that property name on the saga data that this correlation addresses</param>
         /// <param name="sagaType">Specifies the saga type (i.e. the handler type) that contains the logic of the saga</param>
-        public CorrelationProperty(Type messageType, Func<object, object> valueFromMessage, Type sagaDataType, string propertyName, Type sagaType)
+        public CorrelationProperty(Type messageType, Func<IMessageContext, object, object> valueFromMessage, Type sagaDataType, string propertyName, Type sagaType)
         {
-            if (messageType == null) throw new ArgumentNullException("messageType");
-            if (sagaDataType == null) throw new ArgumentNullException("sagaDataType");
-            if (propertyName == null) throw new ArgumentNullException("propertyName");
-            if (sagaType == null) throw new ArgumentNullException("sagaType");
-            PropertyName = propertyName;
-            SagaType = sagaType;
+            PropertyName = propertyName ?? throw new ArgumentNullException(nameof(propertyName));
+            SagaType = sagaType ?? throw new ArgumentNullException(nameof(sagaType));
+            SagaDataType = sagaDataType ?? throw new ArgumentNullException(nameof(sagaDataType));
+            MessageType = messageType ?? throw new ArgumentNullException(nameof(messageType));
             ValueFromMessage = valueFromMessage;
-            SagaDataType = sagaDataType;
-            MessageType = messageType;
-
             Validate();
         }
 
         void Validate()
         {
-            var propertyType = SagaDataType.GetProperty(PropertyName).PropertyType;
+            if (string.IsNullOrWhiteSpace(PropertyName))
+            {
+                throw new ArgumentException($"Reflected saga data correlation property name from {SagaDataType} is empty! This is most likely because the expression passed to the correlation configuration could not be properly reflected - it's the part indicated by !!! here: config.Correlate<TMessage>(m => m.SomeField, d => !!!) - please be sure that you are pointing to a simple property of the saga data");
+            }
+
+            var sagaDataProperty = GetPropertyInfo();
+
+            if (sagaDataProperty == null)
+            {
+                throw new ArgumentException($"Could not find correlation property '{PropertyName}' on saga data of type {SagaDataType}!");
+            }
+
+            var propertyType = sagaDataProperty.PropertyType;
 
             if (AllowedCorrelationPropertyTypes.Contains(propertyType)) return;
 
-            throw new ArgumentException(string.Format("Cannot correlate with the '{0}' property on the '{1}' saga data type - only allowed types are: {2}",
-                PropertyName, SagaDataType.Name, string.Join(", ", AllowedCorrelationPropertyTypes.Select(t => t.Name))));
+            var allowedTypes = string.Join(", ", AllowedCorrelationPropertyTypes.Select(t => t.Name));
+
+            throw new ArgumentException($"Cannot correlate with the '{PropertyName}' property on the '{SagaDataType.Name}' saga data type - only allowed types are: {allowedTypes}");
+        }
+
+        PropertyInfo GetPropertyInfo()
+        {
+            var propertyName = PropertyName;
+            var path = propertyName.Split('.');
+            var type = SagaDataType;
+
+            PropertyInfo propertyInfo = null;
+
+            foreach (var name in path)
+            {
+                propertyInfo = type.GetProperty(name);
+
+                if (propertyInfo == null) return null;
+
+                type = propertyInfo.PropertyType;
+            }
+
+            if (propertyInfo == null) return null;
+
+            return propertyInfo;
         }
 
         /// <summary>
         /// The message type that this property can correlate
         /// </summary>
-        public Type MessageType { get; private set; }
-        
+        public Type MessageType { get; }
+
         /// <summary>
         /// The function that will be called with the message instance in order to extract a value that should be used for correlation
         /// </summary>
-        public Func<object, object> ValueFromMessage { get; private set; }
-        
+        public Func<IMessageContext, object, object> ValueFromMessage { get; }
+
         /// <summary>
         /// Gets the type of the saga's saga data
         /// </summary>
-        public Type SagaDataType { get; private set; }
+        public Type SagaDataType { get; }
 
         /// <summary>
         /// Gets the name of the correlation property
         /// </summary>
-        public string PropertyName { get; private set; }
-        
+        public string PropertyName { get; }
+
         /// <summary>
         /// The saga type (i.e. the handler type) that contains the logic of the saga
         /// </summary>
-        public Type SagaType { get; private set; }
+        public Type SagaType { get; }
     }
 }

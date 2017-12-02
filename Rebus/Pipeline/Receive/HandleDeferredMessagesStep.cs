@@ -1,12 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Threading.Tasks;
 using Rebus.Bus;
 using Rebus.Config;
+using Rebus.Exceptions;
 using Rebus.Extensions;
 using Rebus.Logging;
 using Rebus.Messages;
+using Rebus.Persistence.Throwing;
 using Rebus.Threading;
 using Rebus.Timeouts;
 using Rebus.Transport;
@@ -24,40 +25,33 @@ This is done by checking if the incoming message has a '" + Headers.DeferredUnti
     {
         const string DueMessagesSenderTaskName = "DueMessagesSender";
 
-        static ILog _log;
-
-        static HandleDeferredMessagesStep()
-        {
-            RebusLoggerFactory.Changed += f => _log = f.GetCurrentClassLogger();
-        }
-
         readonly ITimeoutManager _timeoutManager;
         readonly ITransport _transport;
         readonly Options _options;
-        readonly AsyncTask _dueMessagesSenderBackgroundTask;
+        readonly IAsyncTask _dueMessagesSenderBackgroundTask;
+        readonly ILog _log;
+
+        bool _disposed;
 
         /// <summary>
         /// Constructs the step, using the specified <see cref="ITimeoutManager"/> to defer relevant messages
         /// and the specified <see cref="ITransport"/> to deliver messages when they're due.
         /// </summary>
-        public HandleDeferredMessagesStep(ITimeoutManager timeoutManager, ITransport transport, Options options)
+        public HandleDeferredMessagesStep(ITimeoutManager timeoutManager, ITransport transport, Options options, IRebusLoggerFactory rebusLoggerFactory, IAsyncTaskFactory asyncTaskFactory)
         {
-            _timeoutManager = timeoutManager;
-            _transport = transport;
-            _options = options;
+            if (rebusLoggerFactory == null) throw new ArgumentNullException(nameof(rebusLoggerFactory));
+            if (asyncTaskFactory == null) throw new ArgumentNullException(nameof(asyncTaskFactory));
 
-            _dueMessagesSenderBackgroundTask = new AsyncTask(DueMessagesSenderTaskName, TimerElapsed)
-            {
-                Interval = TimeSpan.FromSeconds(1)
-            };
-        }
+            _timeoutManager = timeoutManager ?? throw new ArgumentNullException(nameof(timeoutManager));
+            _transport = transport ?? throw new ArgumentNullException(nameof(transport));
+            _options = options ?? throw new ArgumentNullException(nameof(options));
 
-        /// <summary>
-        /// Last-resort disposal of resources, including shutting down the <see cref="DueMessagesSenderTaskName"/> background task.
-        /// </summary>
-        ~HandleDeferredMessagesStep()
-        {
-            Dispose(false);
+            _log = rebusLoggerFactory.GetLogger<HandleDeferredMessagesStep>();
+
+            var dueTimeoutsPollIntervalSeconds = (int)options.DueTimeoutsPollInterval.TotalSeconds;
+            var intervalToUse = dueTimeoutsPollIntervalSeconds >= 1 ? dueTimeoutsPollIntervalSeconds : 1;
+
+            _dueMessagesSenderBackgroundTask = asyncTaskFactory.Create(DueMessagesSenderTaskName, TimerElapsed, intervalSeconds: intervalToUse);
         }
 
         /// <summary>
@@ -65,79 +59,88 @@ This is done by checking if the incoming message has a '" + Headers.DeferredUnti
         /// </summary>
         public void Initialize()
         {
+            // if the step has already been disposed, it is because it has been removed from the pipeline.... we might as well avoid doing stuff here, so let's just ignore the call
+            if (_disposed) return;
+
             if (UsingExternalTimeoutManager)
             {
-                _log.Info("Using external timeout manager with this address: '{0}'",
-                    _options.ExternalTimeoutManagerAddressOrNull);
+                _log.Info("Using external timeout manager with this address: {queueName}", _options.ExternalTimeoutManagerAddressOrNull);
+                return;
             }
-            else
+
+            // ATM this is the best way to detect that the timeout manager is disabled and we therefore should not start the background task that polls for due messages
+            if (_timeoutManager is DisabledTimeoutManager)
             {
-                _dueMessagesSenderBackgroundTask.Start();
+                return;
             }
+
+            _dueMessagesSenderBackgroundTask.Start();
         }
 
-        bool UsingExternalTimeoutManager
-        {
-            get { return !string.IsNullOrWhiteSpace(_options.ExternalTimeoutManagerAddressOrNull); }
-        }
+        bool UsingExternalTimeoutManager => !string.IsNullOrWhiteSpace(_options.ExternalTimeoutManagerAddressOrNull);
 
         async Task TimerElapsed()
         {
-            using (var result = await _timeoutManager.GetDueMessages())
+            using (var result = await _timeoutManager.GetDueMessages().ConfigureAwait(false))
             {
                 foreach (var dueMessage in result)
                 {
                     var transportMessage = dueMessage.ToTransportMessage();
-                    var returnAddress = transportMessage.Headers[Headers.ReturnAddress];
+                    var returnAddress = transportMessage.Headers[Headers.DeferredRecipient];
 
-                    _log.Debug("Sending due message {0} to {1}",
-                        transportMessage.Headers[Headers.MessageId],
+                    _log.Debug("Sending due message {messageLabel} to {queueName}",
+                        transportMessage.GetMessageLabel(),
                         returnAddress);
 
-                    using (var context = new DefaultTransactionContext())
+                    using (var context = new TransactionContext())
                     {
-                        await _transport.Send(returnAddress, transportMessage, context);
+                        await _transport.Send(returnAddress, transportMessage, context).ConfigureAwait(false);
 
-                        await context.Complete();
+                        await context.Complete().ConfigureAwait(false);
                     }
 
-                    dueMessage.MarkAsCompleted();
+                    await dueMessage.MarkAsCompleted().ConfigureAwait(false);
                 }
+
+                await result.Complete().ConfigureAwait(false);
             }
         }
 
+        /// <summary>
+        /// Checks to see if the incoming message has the <see cref="Headers.DeferredUntil"/> header. If that is the case, the message is either stored for later delivery
+        /// or forwarded to the configured external timeout manager. If not, the message will be passed on down the pipeline.
+        /// </summary>
         public async Task Process(IncomingStepContext context, Func<Task> next)
         {
             var transportMessage = context.Load<TransportMessage>();
 
-            string deferredUntil;
-
             var headers = transportMessage.Headers;
 
-            if (!headers.TryGetValue(Headers.DeferredUntil, out deferredUntil))
+            if (!headers.TryGetValue(Headers.DeferredUntil, out var deferredUntil))
             {
-                await next();
-                return;
-            }
-
-            if (!headers.ContainsKey(Headers.ReturnAddress))
-            {
-                throw new ApplicationException(string.Format("Received message {0} with the '{1}' header set to '{2}', but the message had no '{3}' header!",
-                    headers[Headers.MessageId],
-                    Headers.DeferredUntil,
-                    headers[Headers.DeferredUntil],
-                    Headers.ReturnAddress));
-            }
-
-            if (UsingExternalTimeoutManager)
-            {
-                var transactionContext = context.Load<ITransactionContext>();
-
-                await ForwardMessageToExternalTimeoutManager(transportMessage, transactionContext);
+                await next().ConfigureAwait(false);
+                //return;don't return here! for some reason it is faster to have an "else"
             }
             else
             {
-                await StoreMessageUntilDue(deferredUntil, headers, transportMessage);
+                if (!headers.ContainsKey(Headers.DeferredRecipient))
+                {
+                    throw new RebusApplicationException(
+                        $"Received message {headers[Headers.MessageId]} with the '{Headers.DeferredUntil}' header" +
+                        $" set to '{headers[Headers.DeferredUntil]}', but the message had no" +
+                        $" '{Headers.DeferredRecipient}' header!");
+                }
+
+                if (UsingExternalTimeoutManager)
+                {
+                    var transactionContext = context.Load<ITransactionContext>();
+
+                    await ForwardMessageToExternalTimeoutManager(transportMessage, transactionContext).ConfigureAwait(false);
+                }
+                else
+                {
+                    await StoreMessageUntilDue(deferredUntil, headers, transportMessage).ConfigureAwait(false);
+                }
             }
         }
 
@@ -145,21 +148,21 @@ This is done by checking if the incoming message has a '" + Headers.DeferredUnti
         {
             var timeoutManagerAddress = _options.ExternalTimeoutManagerAddressOrNull;
 
-            _log.Info("Forwarding deferred message {0} to external timeout manager '{1}'",
+            _log.Debug("Forwarding deferred message {messageLabel} to external timeout manager '{queueName}'",
                 transportMessage.GetMessageLabel(), timeoutManagerAddress);
 
-            await _transport.Send(timeoutManagerAddress, transportMessage, transactionContext);
+            await _transport.Send(timeoutManagerAddress, transportMessage, transactionContext).ConfigureAwait(false);
         }
 
         async Task StoreMessageUntilDue(string deferredUntil, Dictionary<string, string> headers, TransportMessage transportMessage)
         {
             var approximateDueTime = GetTimeToBeDelivered(deferredUntil);
 
-            _log.Info("Deferring message {0} until {1}", headers[Headers.MessageId], approximateDueTime);
+            _log.Debug("Deferring message {messageLabel} until {dueTime}", transportMessage.GetMessageLabel(), approximateDueTime);
 
             headers.Remove(Headers.DeferredUntil);
 
-            await _timeoutManager.Defer(approximateDueTime, headers, transportMessage.Body);
+            await _timeoutManager.Defer(approximateDueTime, headers, transportMessage.Body).ConfigureAwait(false);
         }
 
         static DateTimeOffset GetTimeToBeDelivered(string deferredUntil)
@@ -170,22 +173,25 @@ This is done by checking if the incoming message has a '" + Headers.DeferredUnti
             }
             catch (Exception exception)
             {
-                throw new FormatException(string.Format("Could not parse the '{0}' header value", Headers.DeferredUntil), exception);
+                throw new FormatException($"Could not parse the '{Headers.DeferredUntil}' header value", exception);
             }
         }
 
+        /// <summary>
+        /// Last-resort disposal of the due messages background task
+        /// </summary>
         public void Dispose()
         {
-            GC.SuppressFinalize(this);
-            Dispose(true);
-        }
+            if (_disposed) return;
 
-        /// <summary>
-        /// Stops the background task
-        /// </summary>
-        protected virtual void Dispose(bool disposing)
-        {
-            _dueMessagesSenderBackgroundTask.Dispose();
+            try
+            {
+                _dueMessagesSenderBackgroundTask.Dispose();
+            }
+            finally
+            {
+                _disposed = true;
+            }
         }
     }
 }

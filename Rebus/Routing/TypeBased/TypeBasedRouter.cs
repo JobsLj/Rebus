@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading.Tasks;
 using Rebus.Logging;
 using Rebus.Messages;
@@ -12,14 +13,19 @@ namespace Rebus.Routing.TypeBased
     /// </summary>
     public class TypeBasedRouter : IRouter
     {
-        static ILog _log;
-
-        static TypeBasedRouter()
-        {
-            RebusLoggerFactory.Changed += f => _log = f.GetCurrentClassLogger();
-        }
-
         readonly Dictionary<Type, string> _messageTypeAddresses = new Dictionary<Type, string>();
+        readonly ILog _log;
+
+        string _fallbackAddress;
+
+        /// <summary>
+        /// Constructs the router
+        /// </summary>
+        public TypeBasedRouter(IRebusLoggerFactory rebusLoggerFactory)
+        {
+            if (rebusLoggerFactory == null) throw new ArgumentNullException(nameof(rebusLoggerFactory));
+            _log = rebusLoggerFactory.GetLogger<TypeBasedRouter>();
+        }
 
         /// <summary>
         /// Maps <paramref name="destinationAddress"/> as the owner of all message types found in the same assembly as <typeparamref name="TMessage"/>
@@ -35,7 +41,7 @@ namespace Rebus.Routing.TypeBased
         /// </summary>
         public TypeBasedRouter MapAssemblyOf(Type messageType, string destinationAddress)
         {
-            foreach (var typeToMap in messageType.Assembly.GetTypes())
+            foreach (var typeToMap in messageType.GetTypeInfo().Assembly.GetTypes())
             {
                 SaveMapping(typeToMap, destinationAddress);
             }
@@ -52,6 +58,23 @@ namespace Rebus.Routing.TypeBased
         }
 
         /// <summary>
+        /// Configures <paramref name="destinationAddress"/> as a fallback which will be returned when trying to get a destination for an unmapped type
+        /// </summary>
+        public TypeBasedRouter MapFallback(string destinationAddress)
+        {
+            if (destinationAddress == null) throw new ArgumentNullException(nameof(destinationAddress));
+
+            if (_fallbackAddress != null)
+            {
+                _log.Warn("Existing fallback mapping -> {queueName} changed to -> {newQueueName}", _fallbackAddress, destinationAddress);
+            }
+
+            _fallbackAddress = destinationAddress;
+
+            return this;
+        }
+
+        /// <summary>
         /// Maps <paramref name="destinationAddress"/> as the owner of the <paramref name="messageType"/> message type
         /// </summary>
         public TypeBasedRouter Map(Type messageType, string destinationAddress)
@@ -62,34 +85,40 @@ namespace Rebus.Routing.TypeBased
 
         void SaveMapping(Type messageType, string destinationAddress)
         {
-            if (messageType == null) throw new ArgumentNullException("messageType");
-            if (destinationAddress == null) throw new ArgumentNullException("destinationAddress");
+            if (messageType == null) throw new ArgumentNullException(nameof(messageType));
+            if (destinationAddress == null) throw new ArgumentNullException(nameof(destinationAddress));
 
             if (_messageTypeAddresses.ContainsKey(messageType) &&
                 _messageTypeAddresses[messageType] != destinationAddress)
             {
-                _log.Warn("Existing endpoint mapping {0} -> {1} overridden by {0} -> {2}",
+                _log.Warn("Existing endpoint mapping {messageType} -> {queueName} changed to -> {newQueueName}",
                     messageType, _messageTypeAddresses[messageType], destinationAddress);
             }
             else
             {
-                _log.Info("Mapped {0} -> {1}", messageType, destinationAddress);
+                _log.Info("Mapped {messageType} -> {queueName}", messageType, destinationAddress);
             }
 
             _messageTypeAddresses[messageType] = destinationAddress;
         }
 
+        /// <summary>
+        /// Gets the destination address for the given message
+        /// </summary>
         public async Task<string> GetDestinationAddress(Message message)
         {
-            if (message == null) throw new ArgumentNullException("message");
-            if (message.Body == null) throw new ArgumentException("message.Body cannot be null when using the simple type-based router");
+            if (message == null) throw new ArgumentNullException(nameof(message));
+            if (message.Body == null) throw new ArgumentException("message.Body cannot be null when using the type-based router");
 
             return GetDestinationAddressForMessageType(message.Body.GetType());
         }
 
+        /// <summary>
+        /// Looks up the owner of the topic which is assumed to be an assembly-qualified name of an available .NET type
+        /// </summary>
         public async Task<string> GetOwnerAddress(string topic)
         {
-            if (topic == null) throw new ArgumentNullException("topic");
+            if (topic == null) throw new ArgumentNullException(nameof(topic));
 
             var messageType = GetMessageTypeFromTopic(topic);
 
@@ -104,7 +133,8 @@ namespace Rebus.Routing.TypeBased
             }
             catch (Exception exception)
             {
-                throw new ArgumentException(string.Format("The topic '{0}' could not be mapped to a message type! When using the type-based router, only topics based on proper, accessible .NET types can be used!", topic), exception);
+                throw new ArgumentException(
+                    $"The topic '{topic}' could not be mapped to a message type! When using the type-based router, only topics based on proper, accessible .NET types can be used!", exception);
             }
         }
 
@@ -114,11 +144,12 @@ namespace Rebus.Routing.TypeBased
 
             if (!_messageTypeAddresses.TryGetValue(messageType, out destinationAddress))
             {
-                throw new ArgumentException(
-                    string.Format(@"Cannot get destination for message of type {0} because it has not been mapped! 
+                if (_fallbackAddress != null) return _fallbackAddress;
 
-You need to ensure that all message types that you intend to bus.Send or bus.Subscribe to are mapped to an endpoint - it can be done by calling .Map<SomeMessage>(someEndpoint) or .MapAssemblyOf<SomeMessage>(someEndpoint) in the routing configuration.",
-                        messageType));
+                throw new ArgumentException(
+                    $@"Cannot get destination for message of type {messageType} because it has not been mapped! 
+
+You need to ensure that all message types that you intend to bus.Send or bus.Subscribe to are mapped to an endpoint - it can be done by calling .Map<SomeMessage>(someEndpoint) or .MapAssemblyOf<SomeMessage>(someEndpoint) in the routing configuration.");
             }
 
             return destinationAddress;

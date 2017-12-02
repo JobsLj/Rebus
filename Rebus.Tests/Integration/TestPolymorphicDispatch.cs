@@ -6,14 +6,18 @@ using NUnit.Framework;
 using Rebus.Activation;
 using Rebus.Bus;
 using Rebus.Config;
-using Rebus.Tests.Extensions;
+using Rebus.Handlers;
+using Rebus.Tests.Contracts;
+using Rebus.Tests.Contracts.Extensions;
 using Rebus.Transport.InMem;
+#pragma warning disable 1998
 
 namespace Rebus.Tests.Integration
 {
     [TestFixture]
     public class TestPolymorphicDispatch : FixtureBase
     {
+        static readonly TimeSpan BlockingWaitTimeout = TimeSpan.FromSeconds(5);
         BuiltinHandlerActivator _handlerActivator;
         IBus _bus;
 
@@ -41,7 +45,7 @@ namespace Rebus.Tests.Integration
 
             _handlerActivator.Handle<BaseMessage>(async msg =>
             {
-                events.Enqueue(string.Format("Got {0} with {1}", msg.GetType().Name, msg.Payload));
+                events.Enqueue($"Got {msg.GetType().Name} with {msg.Payload}");
 
                 gotMessage.Set();
             });
@@ -49,8 +53,8 @@ namespace Rebus.Tests.Integration
             await _bus.SendLocal(new SpecializationA { Payload = "a" });
             await _bus.SendLocal(new SpecializationB { Payload = "b" });
 
-            gotMessage.WaitOrDie(TimeSpan.FromSeconds(1), "Did not get the first message");
-            gotMessage.WaitOrDie(TimeSpan.FromSeconds(1), "Did not get the second message");
+            gotMessage.WaitOrDie(BlockingWaitTimeout, "Did not get the first message");
+            gotMessage.WaitOrDie(BlockingWaitTimeout, "Did not get the second message");
 
             Assert.That(events.ToArray(), Is.EqualTo(new[]
             {
@@ -67,13 +71,13 @@ namespace Rebus.Tests.Integration
 
             _handlerActivator.Handle<object>(async msg =>
             {
-                events.Enqueue(string.Format("Got {0}", msg.GetType().Name));
+                events.Enqueue($"Got {msg.GetType().Name}");
                 gotMessage.Set();
             });
 
             await _bus.SendLocal("hej med dig");
 
-            gotMessage.WaitOrDie(TimeSpan.FromSeconds(1));
+            gotMessage.WaitOrDie(BlockingWaitTimeout);
 
             Assert.That(events.ToArray(), Is.EqualTo(new[]
             {
@@ -89,13 +93,13 @@ namespace Rebus.Tests.Integration
 
             _handlerActivator.Handle<IMessage>(async msg =>
             {
-                events.Enqueue(string.Format("Got {0}", msg.GetType().Name));
+                events.Enqueue($"Got {msg.GetType().Name}");
                 gotMessage.Set();
             });
 
             await _bus.SendLocal(new ImplementorOfInterface());
 
-            gotMessage.WaitOrDie(TimeSpan.FromSeconds(1));
+            gotMessage.WaitOrDie(BlockingWaitTimeout);
 
             Assert.That(events.ToArray(), Is.EqualTo(new[]
             {
@@ -114,5 +118,51 @@ namespace Rebus.Tests.Integration
         interface IMessage { }
 
         class ImplementorOfInterface : IMessage { }
+
+        [Test]
+        public async Task WorksWithHandlerPipelineToo()
+        {
+            var events = new ConcurrentQueue<string>();
+
+            _handlerActivator
+                .Register(() => new Handler1(events))
+                .Register(() => new Handler2(events));
+
+            await _bus.SendLocal(new SomeMessage());
+
+            await events.WaitUntil(q => q.Count == 2);
+
+            Console.WriteLine($@"Got these events:
+
+{string.Join(Environment.NewLine, events)}
+");
+
+            Assert.That(events.ToArray(), Is.EqualTo(new[]
+            {
+                "Handled by Handler1",
+                "Handled by Handler2"
+            }));
+        }
+
+        public interface ISomeInterface { }
+
+        public class SomeMessage : ISomeInterface { }
+
+        public class Handler1 : IHandleMessages<SomeMessage>
+        {
+            readonly ConcurrentQueue<string> _events;
+
+            public Handler1(ConcurrentQueue<string> events) => _events = events;
+
+            public async Task Handle(SomeMessage message) => _events.Enqueue("Handled by Handler1");
+        }
+        public class Handler2 : IHandleMessages<ISomeInterface>
+        {
+            readonly ConcurrentQueue<string> _events;
+
+            public Handler2(ConcurrentQueue<string> events) => _events = events;
+
+            public async Task Handle(ISomeInterface message) => _events.Enqueue("Handled by Handler2");
+        }
     }
 }

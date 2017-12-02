@@ -1,38 +1,64 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Runtime.Serialization;
+using System.Text;
 using Newtonsoft.Json;
 
 namespace Rebus.Serialization
 {
     /// <summary>
-    /// Generic serializer that serializes <see cref="Dictionary{TKey,TValue}"/> of <see cref="String"/> keys and <see cref="String"/> values
-    /// into JSON and back
+    /// Simple serializer that can be used to encode/decode headers to/from bytes
     /// </summary>
     public class HeaderSerializer
     {
-        readonly JsonSerializerSettings _settings = new JsonSerializerSettings();
+        static readonly Encoding DefaultEncoding = Encoding.UTF8;
 
         /// <summary>
-        /// Serializes the given dictionary into a JSON string
+        /// Configures which encoding to use for encoding the string of headers to/from bytes
+        /// </summary>
+        public Encoding Encoding { get; set; } = DefaultEncoding;
+
+        /// <summary>
+        /// Encodes the headers into a string
         /// </summary>
         public string SerializeToString(Dictionary<string, string> headers)
         {
-            return JsonConvert.SerializeObject(headers, _settings);
+            return JsonConvert.SerializeObject(headers);
         }
 
         /// <summary>
-        /// Deserializes the given JSON string into a dictionary
+        /// Encodes the headers into a byte array
         /// </summary>
-        public Dictionary<string, string> DeserializeFromString(string headers)
+        public byte[] Serialize(Dictionary<string, string> headers)
+        {
+            var jsonString = SerializeToString(headers);
+
+            return Encoding.GetBytes(jsonString);
+        }
+
+        /// <summary>
+        /// Decodes the headers from the given byte array
+        /// </summary>
+        public Dictionary<string, string> Deserialize(byte[] bytes)
+        {
+            var jsonString = Encoding.GetString(bytes);
+
+            return DeserializeFromString(jsonString);
+        }
+
+        /// <summary>
+        /// Decodes the headers from the given string
+        /// </summary>
+        public Dictionary<string, string> DeserializeFromString(string str)
         {
             try
             {
-                return JsonConvert.DeserializeObject<Dictionary<string, string>>(headers, _settings);
+                return JsonConvert.DeserializeObject<Dictionary<string, string>>(str);
             }
             catch (Exception exception)
             {
-                throw new JsonSerializationException(string.Format("Could not deserialize JSON text as headers: '{0}'", headers), exception);
+                throw new SerializationException($"Could not deserialize JSON text '{str}'", exception);
             }
-        } 
+        }
     }
 }

@@ -4,6 +4,8 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 using Rebus.Activation;
 using Rebus.Config;
+using Rebus.Tests.Contracts;
+using Rebus.Tests.Contracts.Extensions;
 using Rebus.Tests.Extensions;
 using Rebus.Transport.InMem;
 
@@ -36,7 +38,7 @@ namespace Rebus.Tests.Integration
             {
                 await bus.SendLocal("hej");
 
-                gotMessage.WaitOrDie(TimeSpan.FromSeconds(1));
+                gotMessage.WaitOrDie(TimeSpan.FromSeconds(2));
 
                 // make bus shut down here
             }

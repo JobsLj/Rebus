@@ -25,6 +25,7 @@ namespace Rebus.Pipeline
         /// </summary>
         public PipelineStepInjector(IPipeline pipeline)
         {
+            if (pipeline == null) throw new ArgumentNullException(nameof(pipeline));
             _pipeline = pipeline;
         }
 
@@ -32,54 +33,21 @@ namespace Rebus.Pipeline
         /// Gets the ordered sequence of <see cref="IOutgoingStep"/> that makes up the outgoing pipeline, injecting any configured outgoing steps
         /// at their appropriate places
         /// </summary>
-        public IEnumerable<IOutgoingStep> SendPipeline()
+        public IOutgoingStep[] SendPipeline()
         {
-            var encounteredStepTypes = new HashSet<Type>();
-
-            foreach (var step in _pipeline.SendPipeline())
-            {
-                var currentStepType = step.GetType();
-                
-                encounteredStepTypes.Add(currentStepType);
-                
-                List<Tuple<PipelineRelativePosition, IOutgoingStep>> injectedStep;
-
-                if (_outgoingInjectedSteps.TryGetValue(currentStepType, out injectedStep))
-                {
-                    foreach (var stepToInject in injectedStep.Where(i => i.Item1 == PipelineRelativePosition.Before))
-                    {
-                        yield return stepToInject.Item2;
-                    }
-
-                    yield return step;
-
-                    foreach (var stepToInject in injectedStep.Where(i => i.Item1 == PipelineRelativePosition.After))
-                    {
-                        yield return stepToInject.Item2;
-                    }
-                }
-                else
-                {
-                    yield return step;
-                }
-            }
-
-            var typesNotEncountered = _outgoingInjectedSteps.Keys.Except(encounteredStepTypes);
-
-            foreach (var typeNotEncountered in typesNotEncountered)
-            {
-                foreach (var missingStep in _outgoingInjectedSteps[typeNotEncountered])
-                {
-                    yield return missingStep.Item2;
-                }
-            }
+            return ComposeSendPipeline().ToArray();
         }
 
         /// <summary>
         /// Gets the ordered sequence of <see cref="IIncomingStep"/> that makes up the incoming pipeline, injecting any configured incoming steps
         /// at their appropriate places
         /// </summary>
-        public IEnumerable<IIncomingStep> ReceivePipeline()
+        public IIncomingStep[] ReceivePipeline()
+        {
+            return ComposeReceivePipeline().ToArray();
+        }
+
+        IEnumerable<IIncomingStep> ComposeReceivePipeline()
         {
             var encounteredStepTypes = new HashSet<Type>();
 
@@ -113,12 +81,93 @@ namespace Rebus.Pipeline
 
             var typesNotEncountered = _incomingInjectedSteps.Keys.Except(encounteredStepTypes);
 
-            foreach (var typeNotEncountered in typesNotEncountered)
-            {
-                foreach (var missingStep in _incomingInjectedSteps[typeNotEncountered])
+            var errors = typesNotEncountered
+                .Select(type => new
                 {
-                    yield return missingStep.Item2;
+                    MissingStepType = type,
+                    StepsToInject = _incomingInjectedSteps[type]
+                })
+                .SelectMany(a => a.StepsToInject.Select(s => new
+                {
+                    a.MissingStepType,
+                    StepToInject = s.Item2,
+                    Position = s.Item1
+                }))
+                .Select(a => $"    {a.StepToInject} => {a.Position} => {a.MissingStepType}")
+                .ToList();
+
+            if (errors.Any())
+            {
+                throw new ArgumentException(
+                    $@"Could not finish composition of the RECEIVE pipeline because the following injections could not be made:
+
+{string.Join(Environment.NewLine, errors)}
+
+Please pick other steps to use when anchoring your step injections, or pick another way of assembling the pipeline.
+If you require the ultimate flexibility, you will probably need to decorate IPipeline and compose it manually.
+");
+            }
+        }
+
+        IEnumerable<IOutgoingStep> ComposeSendPipeline()
+        {
+            var encounteredStepTypes = new HashSet<Type>();
+
+            foreach (var step in _pipeline.SendPipeline())
+            {
+                var currentStepType = step.GetType();
+
+                encounteredStepTypes.Add(currentStepType);
+
+                List<Tuple<PipelineRelativePosition, IOutgoingStep>> injectedStep;
+
+                if (_outgoingInjectedSteps.TryGetValue(currentStepType, out injectedStep))
+                {
+                    foreach (var stepToInject in injectedStep.Where(i => i.Item1 == PipelineRelativePosition.Before))
+                    {
+                        yield return stepToInject.Item2;
+                    }
+
+                    yield return step;
+
+                    foreach (var stepToInject in injectedStep.Where(i => i.Item1 == PipelineRelativePosition.After))
+                    {
+                        yield return stepToInject.Item2;
+                    }
                 }
+                else
+                {
+                    yield return step;
+                }
+            }
+
+            var typesNotEncountered = _outgoingInjectedSteps.Keys.Except(encounteredStepTypes);
+
+            var errors = typesNotEncountered
+                .Select(type => new
+                {
+                    MissingStepType = type,
+                    StepsToInject = _outgoingInjectedSteps[type]
+                })
+                .SelectMany(a => a.StepsToInject.Select(s => new
+                {
+                    a.MissingStepType,
+                    StepToInject = s.Item2,
+                    Position = s.Item1
+                }))
+                .Select(a => $"    {a.StepToInject} => {a.Position} => {a.MissingStepType}")
+                .ToList();
+
+            if (errors.Any())
+            {
+                throw new ArgumentException(
+                    $@"Could not finish composition of the SEND pipeline because the following injections could not be made:
+
+{string.Join(Environment.NewLine, errors)}
+
+Please pick other steps to use when anchoring your step injections, or pick another way of assembling the pipeline.
+If you require the ultimate flexibility, you will probably need to decorate IPipeline and compose it manually.
+");
             }
         }
 
@@ -129,8 +178,8 @@ namespace Rebus.Pipeline
         /// </summary>
         public PipelineStepInjector OnSend(IOutgoingStep step, PipelineRelativePosition position, Type anchorStep)
         {
-            if (step == null) throw new ArgumentNullException("step");
-            if (anchorStep == null) throw new ArgumentNullException("anchorStep");
+            if (step == null) throw new ArgumentNullException(nameof(step));
+            if (anchorStep == null) throw new ArgumentNullException(nameof(anchorStep));
 
             _outgoingInjectedSteps
                 .GetOrAdd(anchorStep, _ => new List<Tuple<PipelineRelativePosition, IOutgoingStep>>())
@@ -146,8 +195,8 @@ namespace Rebus.Pipeline
         /// </summary>
         public PipelineStepInjector OnReceive(IIncomingStep step, PipelineRelativePosition position, Type anchorStep)
         {
-            if (step == null) throw new ArgumentNullException("step");
-            if (anchorStep == null) throw new ArgumentNullException("anchorStep");
+            if (step == null) throw new ArgumentNullException(nameof(step));
+            if (anchorStep == null) throw new ArgumentNullException(nameof(anchorStep));
 
             _incomingInjectedSteps
                 .GetOrAdd(anchorStep, _ => new List<Tuple<PipelineRelativePosition, IIncomingStep>>())

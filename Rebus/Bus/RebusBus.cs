@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Rebus.Bus.Advanced;
 using Rebus.Config;
+using Rebus.DataBus;
 using Rebus.Exceptions;
 using Rebus.Extensions;
 using Rebus.Logging;
@@ -17,6 +18,7 @@ using Rebus.Subscriptions;
 using Rebus.Time;
 using Rebus.Transport;
 using Rebus.Workers;
+// ReSharper disable ArgumentsStyleLiteral
 
 namespace Rebus.Bus
 {
@@ -25,39 +27,36 @@ namespace Rebus.Bus
     /// </summary>
     public partial class RebusBus : IBus
     {
-        static ILog _log;
-
-        static RebusBus()
-        {
-            RebusLoggerFactory.Changed += f => _log = f.GetCurrentClassLogger();
-        }
-
         static int _busIdCounter;
 
         readonly int _busId = Interlocked.Increment(ref _busIdCounter);
 
         readonly List<IWorker> _workers = new List<IWorker>();
 
+        readonly BusLifetimeEvents _busLifetimeEvents;
+        readonly IDataBus _dataBus;
         readonly IWorkerFactory _workerFactory;
         readonly IRouter _router;
         readonly ITransport _transport;
-        readonly IPipeline _pipeline;
         readonly IPipelineInvoker _pipelineInvoker;
         readonly ISubscriptionStorage _subscriptionStorage;
         readonly Options _options;
+        readonly ILog _log;
 
         /// <summary>
         /// Constructs the bus.
         /// </summary>
-        public RebusBus(IWorkerFactory workerFactory, IRouter router, ITransport transport, IPipeline pipeline, IPipelineInvoker pipelineInvoker, ISubscriptionStorage subscriptionStorage, Options options)
+        public RebusBus(IWorkerFactory workerFactory, IRouter router, ITransport transport, IPipelineInvoker pipelineInvoker, ISubscriptionStorage subscriptionStorage, Options options, IRebusLoggerFactory rebusLoggerFactory, BusLifetimeEvents busLifetimeEvents, IDataBus dataBus)
         {
             _workerFactory = workerFactory;
             _router = router;
             _transport = transport;
-            _pipeline = pipeline;
             _pipelineInvoker = pipelineInvoker;
             _subscriptionStorage = subscriptionStorage;
             _options = options;
+            _busLifetimeEvents = busLifetimeEvents;
+            _dataBus = dataBus;
+            _log = rebusLoggerFactory.GetLogger<RebusBus>();
         }
 
         /// <summary>
@@ -65,9 +64,13 @@ namespace Rebus.Bus
         /// </summary>
         public void Start(int numberOfWorkers)
         {
-            _log.Info("Starting bus {0}", _busId);
+            _log.Info("Starting bus {busId}", _busId);
+
+            _busLifetimeEvents.RaiseBusStarting();
 
             SetNumberOfWorkers(numberOfWorkers);
+
+            _busLifetimeEvents.RaiseBusStarted();
 
             _log.Info("Started");
         }
@@ -86,7 +89,7 @@ namespace Rebus.Bus
 
             var logicalMessage = CreateMessage(commandMessage, Operation.SendLocal, optionalHeaders);
 
-            await InnerSend(new[] { destinationAddress }, logicalMessage);
+            await InnerSend(new[] { destinationAddress }, logicalMessage).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -95,46 +98,43 @@ namespace Rebus.Bus
         public async Task Send(object commandMessage, Dictionary<string, string> optionalHeaders = null)
         {
             var logicalMessage = CreateMessage(commandMessage, Operation.Send, optionalHeaders);
-            var destinationAddress = await _router.GetDestinationAddress(logicalMessage);
 
-            await InnerSend(new[] { destinationAddress }, logicalMessage);
+            var destinationAddress = await _router.GetDestinationAddress(logicalMessage).ConfigureAwait(false);
+            
+            await InnerSend(new[] { destinationAddress }, logicalMessage).ConfigureAwait(false);
         }
 
         /// <summary>
-        /// Sends the specified command message to the address specified as <paramref name="destinationAddress"/>, optionally specifying some headers to attach to the message
+        /// Defers into the future the specified message, optionally specifying some headers to attach to the message. Unless the <see cref="Headers.DeferredRecipient"/> is specified
+        /// in a header, the bus instance's own input address will be set as the return address, which will cause the message to be delivered to that address when the <paramref name="delay"/>
+        /// has elapsed.
         /// </summary>
-        public async Task Route(string destinationAddress, object explicitlyRoutedMessage, Dictionary<string, string> optionalHeaders = null)
+        public async Task DeferLocal(TimeSpan delay, object message, Dictionary<string, string> optionalHeaders = null)
         {
-            var logicalMessage = CreateMessage(explicitlyRoutedMessage, Operation.Send, optionalHeaders);
+            var logicalMessage = CreateMessage(message, Operation.Defer, optionalHeaders);
+            
+            logicalMessage.SetDeferHeaders(RebusTime.Now + delay, _transport.Address);
 
-            await InnerSend(new[] { destinationAddress }, logicalMessage);
+            var timeoutManagerAddress = GetTimeoutManagerAddress();
+
+            await InnerSend(new[] { timeoutManagerAddress }, logicalMessage).ConfigureAwait(false);
         }
 
         /// <summary>
-        /// Publishes the specified event message on the specified topic, optionally specifying some headers to attach to the message
-        /// </summary>
-        public async Task Publish(string topic, object eventMessage, Dictionary<string, string> optionalHeaders = null)
-        {
-            var logicalMessage = CreateMessage(eventMessage, Operation.Publish, optionalHeaders);
-            var subscriberAddresses = await _subscriptionStorage.GetSubscriberAddresses(topic);
-
-            await InnerSend(subscriberAddresses, logicalMessage);
-        }
-
-        /// <summary>
-        /// Defers into the future the specified message, optionally specifying some headers to attach to the message. Unless the <see cref="Headers.ReturnAddress"/> is specified
-        /// in a header, the instance's own input address will be set as the return address, which will cause the message to be delivered to that address when the <paramref name="delay"/>
+        /// Defers into the future the specified message, optionally specifying some headers to attach to the message. Unless the <see cref="Headers.DeferredRecipient"/> is specified
+        /// in a header, the endpoint mapping corresponding to the sent message will be set as the return address, which will cause the message to be delivered to that address when the <paramref name="delay"/>
         /// has elapsed.
         /// </summary>
         public async Task Defer(TimeSpan delay, object message, Dictionary<string, string> optionalHeaders = null)
         {
             var logicalMessage = CreateMessage(message, Operation.Defer, optionalHeaders);
+            var destinationAddress = await _router.GetDestinationAddress(logicalMessage).ConfigureAwait(false);
 
-            logicalMessage.SetDeferHeader(RebusTime.Now + delay);
+            logicalMessage.SetDeferHeaders(RebusTime.Now + delay, destinationAddress);
 
             var timeoutManagerAddress = GetTimeoutManagerAddress();
 
-            await InnerSend(new[] { timeoutManagerAddress }, logicalMessage);
+            await InnerSend(new[] { timeoutManagerAddress }, logicalMessage).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -144,7 +144,7 @@ namespace Rebus.Bus
         public async Task Reply(object replyMessage, Dictionary<string, string> optionalHeaders = null)
         {
             // reply is slightly different from Send and Publish in that it REQUIRES a transaction context to be present
-            var currentTransactionContext = AmbientTransactionContext.Current;
+            var currentTransactionContext = GetCurrentTransactionContext(mustBelongToThisBus: true);
 
             if (currentTransactionContext == null)
             {
@@ -157,29 +157,127 @@ namespace Rebus.Bus
             var transportMessage = stepContext.Load<TransportMessage>();
             var returnAddress = GetReturnAddress(transportMessage);
 
-            await InnerSend(new[] { returnAddress }, logicalMessage);
+            logicalMessage.Headers[Headers.InReplyTo] = transportMessage.GetMessageId();
+
+            await InnerSend(new[] { returnAddress }, logicalMessage).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Subscribes to the topic defined by the assembly-qualified name of <typeparamref name="TEvent"/>. 
+        /// While this kind of subscription can work universally with the general topic-based routing, it works especially well with type-based routing,
+        /// which can be enabled by going 
+        /// <code>
+        /// Configure.With(...)
+        ///     .(...)
+        ///     .Routing(r => r.TypeBased()
+        ///             .Map&lt;SomeMessage&gt;("someEndpoint")
+        ///             .(...))
+        /// </code>
+        /// in the configuration
+        /// </summary>
+        public Task Subscribe<TEvent>()
+        {
+            return Subscribe(typeof(TEvent));
+        }
+
+        /// <summary>
+        /// Subscribes to the topic defined by the assembly-qualified name of <paramref name="eventType"/>. 
+        /// While this kind of subscription can work universally with the general topic-based routing, it works especially well with type-based routing,
+        /// which can be enabled by going 
+        /// <code>
+        /// Configure.With(...)
+        ///     .(...)
+        ///     .Routing(r => r.TypeBased()
+        ///             .Map&lt;SomeMessage&gt;("someEndpoint")
+        ///             .(...))
+        /// </code>
+        /// in the configuration
+        /// </summary>
+        public Task Subscribe(Type eventType)
+        {
+            var topic = eventType.GetSimpleAssemblyQualifiedName();
+
+            return InnerSubscribe(topic);
+        }
+
+        /// <summary>
+        /// Unsubscribes from the topic defined by the assembly-qualified name of <typeparamref name="TEvent"/>
+        /// </summary>
+        public Task Unsubscribe<TEvent>()
+        {
+            return Unsubscribe(typeof(TEvent));
+        }
+
+        /// <summary>
+        /// Unsubscribes from the topic defined by the assembly-qualified name of <paramref name="eventType"/>
+        /// </summary>
+        public Task Unsubscribe(Type eventType)
+        {
+            var topic = eventType.GetSimpleAssemblyQualifiedName();
+
+            return InnerUnsubscribe(topic);
+        }
+
+        /// <summary>
+        /// Publishes the event message on the topic defined by the assembly-qualified name of the type of the message.
+        /// While this kind of pub/sub can work universally with the general topic-based routing, it works especially well with type-based routing,
+        /// which can be enabled by going 
+        /// <code>
+        /// Configure.With(...)
+        ///     .(...)
+        ///     .Routing(r => r.TypeBased()
+        ///             .Map&lt;SomeMessage&gt;("someEndpoint")
+        ///             .(...))
+        /// </code>
+        /// in the configuration
+        /// </summary>
+        public Task Publish(object eventMessage, Dictionary<string, string> optionalHeaders = null)
+        {
+            if (eventMessage == null) throw new ArgumentNullException(nameof(eventMessage));
+
+            var messageType = eventMessage.GetType();
+            var topic = messageType.GetSimpleAssemblyQualifiedName();
+
+            return InnerPublish(topic, eventMessage, optionalHeaders);
+        }
+
+        /// <summary>
+        /// Gets the API for advanced features of the bus
+        /// </summary>
+        public IAdvancedApi Advanced => new AdvancedApi(this);
+
+        /// <summary>
+        /// Publishes the specified event message on the specified topic, optionally specifying some headers to attach to the message
+        /// </summary>
+        async Task InnerPublish(string topic, object eventMessage, Dictionary<string, string> optionalHeaders = null)
+        {
+            var logicalMessage = CreateMessage(eventMessage, Operation.Publish, optionalHeaders);
+
+            var subscriberAddresses = await _subscriptionStorage.GetSubscriberAddresses(topic).ConfigureAwait(false);
+
+            await InnerSend(subscriberAddresses, logicalMessage).ConfigureAwait(false);
         }
 
         /// <summary>
         /// Subscribes to the specified topic. If the current subscription storage is centralized, the subscription will be established right away. Otherwise, a <see cref="SubscribeRequest"/>
         /// will be sent to the address mapped as the owner (i.e. the publisher) of the given topic.
         /// </summary>
-        public async Task Subscribe(string topic)
+        async Task InnerSubscribe(string topic)
         {
             var subscriberAddress = _transport.Address;
 
             if (subscriberAddress == null)
             {
-                throw new InvalidOperationException(string.Format("Cannot subscribe to '{0}' because this endpoint does not have an input queue!", topic));
+                throw new InvalidOperationException($"Cannot subscribe to '{topic}' because this endpoint does not have an input queue!");
             }
 
             if (_subscriptionStorage.IsCentralized)
             {
-                await _subscriptionStorage.RegisterSubscriber(topic, subscriberAddress);
+                await _subscriptionStorage.RegisterSubscriber(topic, subscriberAddress).ConfigureAwait(false);
             }
             else
             {
-                var destinationAddress = await _router.GetOwnerAddress(topic);
+                var destinationAddress = await _router.GetOwnerAddress(topic).ConfigureAwait(false);
 
                 var logicalMessage = CreateMessage(new SubscribeRequest
                 {
@@ -187,7 +285,7 @@ namespace Rebus.Bus
                     SubscriberAddress = subscriberAddress,
                 }, Operation.Subscribe);
 
-                await InnerSend(new[] { destinationAddress }, logicalMessage);
+                await InnerSend(new[] { destinationAddress }, logicalMessage).ConfigureAwait(false);
             }
         }
 
@@ -195,18 +293,18 @@ namespace Rebus.Bus
         /// Unsubscribes from the specified topic. If the current subscription storage is centralized, the subscription will be removed right away. Otherwise, an <see cref="UnsubscribeRequest"/>
         /// will be sent to the address mapped as the owner (i.e. the publisher) of the given topic.
         /// </summary>
-        public async Task Unsubscribe(string topic)
+        async Task InnerUnsubscribe(string topic)
         {
             var subscriberAddress = _transport.Address;
 
             if (subscriberAddress == null)
             {
-                throw new InvalidOperationException(string.Format("Cannot unsubscribe from '{0}' because this endpoint does not have an input queue!", topic));
+                throw new InvalidOperationException($"Cannot unsubscribe from '{topic}' because this endpoint does not have an input queue!");
             }
 
             if (_subscriptionStorage.IsCentralized)
             {
-                await _subscriptionStorage.UnregisterSubscriber(topic, subscriberAddress);
+                await _subscriptionStorage.UnregisterSubscriber(topic, subscriberAddress).ConfigureAwait(false);
             }
             else
             {
@@ -218,7 +316,7 @@ namespace Rebus.Bus
                     SubscriberAddress = subscriberAddress,
                 }, Operation.Unsubscribe);
 
-                await InnerSend(new[] { destinationAddress }, logicalMessage);
+                await InnerSend(new[] { destinationAddress }, logicalMessage).ConfigureAwait(false);
             }
         }
 
@@ -239,7 +337,7 @@ namespace Rebus.Bus
 
         static Message CreateMessage(object commandMessage, Operation operation, Dictionary<string, string> optionalHeaders = null)
         {
-            var headers = optionalHeaders ?? new Dictionary<string, string>();
+            var headers = CreateHeaders(optionalHeaders);
 
             switch (operation)
             {
@@ -253,6 +351,13 @@ namespace Rebus.Bus
             }
 
             return new Message(headers, commandMessage);
+        }
+
+        static Dictionary<string, string> CreateHeaders(Dictionary<string, string> optionalHeaders)
+        {
+            return optionalHeaders != null
+                ? optionalHeaders.Clone()
+                : new Dictionary<string, string>();
         }
 
         enum Operation
@@ -269,8 +374,10 @@ namespace Rebus.Bus
             }
             catch (Exception exception)
             {
-                throw new RebusApplicationException(string.Format("Could not get the return address from the '{0}' header of the incoming message with ID {1}",
-                    Headers.ReturnAddress, transportMessage.Headers.GetValueOrNull(Headers.MessageId) ?? "<no message ID>"), exception);
+                var message = $"Could not get the return address from the '{Headers.ReturnAddress}' header of the incoming" +
+                              $" message with ID {transportMessage.Headers.GetValueOrNull(Headers.MessageId) ?? "<no message ID>"}";
+
+                throw new RebusApplicationException(exception, message);
             }
         }
 
@@ -282,26 +389,27 @@ namespace Rebus.Bus
             }
             catch (Exception exception)
             {
-                throw new InvalidOperationException(string.Format("Attempted to reply, but could not get the current receive context - are you calling Reply outside of a message handler? Reply can only be called within a message handler because the destination address is found as the '{0}' header on the incoming message",
-                    Headers.ReturnAddress), exception);
+                var message = "Attempted to reply, but could not get the current receive context - are you calling Reply outside of" +
+                              " a message handler? Reply can only be called within a message handler because the destination address" +
+                              $" is found as the '{Headers.ReturnAddress}' header on the incoming message";
+                throw new InvalidOperationException(message, exception);
             }
         }
 
         async Task InnerSend(IEnumerable<string> destinationAddresses, Message logicalMessage)
         {
-            var currentTransactionContext = AmbientTransactionContext.Current;
+            var currentTransactionContext = GetCurrentTransactionContext(mustBelongToThisBus: true);
 
             if (currentTransactionContext != null)
             {
-                await SendUsingTransactionContext(destinationAddresses, logicalMessage, currentTransactionContext);
+                await SendUsingTransactionContext(destinationAddresses, logicalMessage, currentTransactionContext).ConfigureAwait(false);
             }
             else
             {
-                using (var context = new DefaultTransactionContext())
+                using (var context = new TransactionContext())
                 {
-                    await SendUsingTransactionContext(destinationAddresses, logicalMessage, context);
-
-                    await context.Complete();
+                    await SendUsingTransactionContext(destinationAddresses, logicalMessage, context).ConfigureAwait(false);
+                    await context.Complete().ConfigureAwait(false);
                 }
             }
         }
@@ -310,10 +418,29 @@ namespace Rebus.Bus
         {
             var context = new OutgoingStepContext(logicalMessage, transactionContext, new DestinationAddresses(destinationAddresses));
 
-            await _pipelineInvoker.Invoke(context, _pipeline.SendPipeline());
+            await _pipelineInvoker.Invoke(context).ConfigureAwait(false);
+        }
+
+        async Task SendTransportMessage(string destinationAddress, TransportMessage transportMessage)
+        {
+            var transactionContext = GetCurrentTransactionContext(mustBelongToThisBus: true);
+
+            if (transactionContext == null)
+            {
+                using (var context = new TransactionContext())
+                {
+                    await _transport.Send(destinationAddress, transportMessage, context).ConfigureAwait(false);
+                    await context.Complete().ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                await _transport.Send(destinationAddress, transportMessage, transactionContext).ConfigureAwait(false);
+            }
         }
 
         bool _disposing;
+        bool _disposed;
 
         /// <summary>
         /// Stops all workers, allowing them to finish handling the current message (for up to 1 minute) before exiting
@@ -323,10 +450,13 @@ namespace Rebus.Bus
             // this Dispose may be called when the Disposed event is raised - therefore, we need
             // to guard against recursively entering this method
             if (_disposing) return;
+            if (_disposed) return;
 
             try
             {
                 _disposing = true;
+
+                _busLifetimeEvents.RaiseBusDisposing();
 
                 // signal to all the workers that they must stop
                 lock (_workers)
@@ -336,15 +466,20 @@ namespace Rebus.Bus
 
                 SetNumberOfWorkers(0);
 
+                _busLifetimeEvents.RaiseWorkersStopped();
+
                 Disposed();
             }
             finally
             {
                 _disposing = false;
+                _disposed = true;
+
+                _busLifetimeEvents.RaiseBusDisposed();
             }
         }
 
-        static void StopWorker(IWorker worker)
+        void StopWorker(IWorker worker)
         {
             try
             {
@@ -352,7 +487,7 @@ namespace Rebus.Bus
             }
             catch (Exception exception)
             {
-                _log.Warn("An exception occurred when stopping {0}: {1}", worker.Name, exception);
+                _log.Warn("An exception occurred when stopping {workerName}: {exception}", worker.Name, exception);
             }
         }
 
@@ -369,9 +504,24 @@ namespace Rebus.Bus
         {
             if (desiredNumberOfWorkers == GetNumberOfWorkers()) return;
 
-            _log.Info("Setting number of workers to {0}", desiredNumberOfWorkers);
-            while (desiredNumberOfWorkers > GetNumberOfWorkers()) AddWorker();
-            while (desiredNumberOfWorkers < GetNumberOfWorkers()) RemoveWorker();
+            if (desiredNumberOfWorkers > _options.MaxParallelism)
+            {
+                _log.Warn("Attempted to set number of workers to {numberOfWorkers}, but the max allowed parallelism is {maxParallelism}",
+                    desiredNumberOfWorkers, _options.MaxParallelism);
+
+                desiredNumberOfWorkers = _options.MaxParallelism;
+            }
+
+            _log.Info("Setting number of workers to {numberOfWorkers}", desiredNumberOfWorkers);
+            while (desiredNumberOfWorkers > GetNumberOfWorkers())
+            {
+                AddWorker();
+            }
+
+            if (desiredNumberOfWorkers < GetNumberOfWorkers())
+            {
+                RemoveWorkers(desiredNumberOfWorkers);
+            }
         }
 
         int GetNumberOfWorkers()
@@ -386,8 +536,9 @@ namespace Rebus.Bus
         {
             lock (_workers)
             {
-                var workerName = string.Format("Rebus {0} worker {1}", _busId, _workers.Count + 1);
-                _log.Debug("Adding worker {0}", workerName);
+                var workerName = $"Rebus {_busId} worker {_workers.Count + 1}";
+
+                _log.Debug("Adding worker {workerName}", workerName);
 
                 try
                 {
@@ -396,24 +547,55 @@ namespace Rebus.Bus
                 }
                 catch (Exception exception)
                 {
-                    throw new RebusApplicationException(string.Format("Could not create {0}", workerName), exception);
+                    throw new RebusApplicationException(exception, $"Could not create {workerName}");
                 }
             }
         }
 
-        void RemoveWorker()
+        void RemoveWorkers(int desiredNumberOfWorkers)
         {
             lock (_workers)
             {
                 if (_workers.Count == 0) return;
 
-                using (var lastWorker = _workers.Last())
-                {
-                    _log.Debug("Removing worker {0}", lastWorker.Name);
+                var removedWorkers = new List<IWorker>();
 
+                while (_workers.Count > desiredNumberOfWorkers)
+                {
+                    var lastWorker = _workers.Last();
+                    _log.Debug("Removing worker {workerName}", lastWorker.Name);
+                    removedWorkers.Add(lastWorker);
                     _workers.Remove(lastWorker);
                 }
+
+                removedWorkers.ForEach(w => w.Stop());
+
+                // this one will block until all workers have stopped
+                removedWorkers.ForEach(w => w.Dispose());
             }
+        }
+
+        ITransactionContext GetCurrentTransactionContext(bool mustBelongToThisBus)
+        {
+            var transactionContext = AmbientTransactionContext.Current;
+
+            // if there's no context, there's no context
+            if (transactionContext == null) return null;
+
+            // if the context is not required to belong to this bus instance, just return it
+            if (!mustBelongToThisBus) return transactionContext;
+
+            // if there's a context but there's no OwningBus, just return the context (the user created it)
+            object owningBus;
+            if (!transactionContext.Items.TryGetValue("OwningBus", out owningBus))
+            {
+                return transactionContext;
+            }
+
+            // if there is an OwningBus and it is this
+            return Equals(owningBus, this) 
+                ? transactionContext 
+                : null; //< another bus created this context
         }
 
         /// <summary>
@@ -421,16 +603,7 @@ namespace Rebus.Bus
         /// </summary>
         public override string ToString()
         {
-            return string.Format("RebusBus {0}", _busId);
-        }
-
-        /// <summary>
-        /// Gets the API for advanced features of the bus
-        /// </summary>
-        public IAdvancedApi Advanced
-        {
-            // the advanced API is defined in the other partial RebusBus class definition in the AdvancedRebusBus.cs file
-            get { return new AdvancedApi(this); }
+            return $"RebusBus {_busId}";
         }
     }
 }

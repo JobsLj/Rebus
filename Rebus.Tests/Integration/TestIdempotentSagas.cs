@@ -11,11 +11,14 @@ using Rebus.Config;
 using Rebus.Handlers;
 using Rebus.Logging;
 using Rebus.Messages;
+using Rebus.Persistence.InMem;
 using Rebus.Sagas;
 using Rebus.Sagas.Idempotent;
-using Rebus.Tests.Extensions;
+using Rebus.Tests.Contracts;
+using Rebus.Tests.Contracts.Extensions;
 using Rebus.Transport;
 using Rebus.Transport.InMem;
+#pragma warning disable 1998
 
 namespace Rebus.Tests.Integration
 {
@@ -29,7 +32,7 @@ namespace Rebus.Tests.Integration
 
         protected override void SetUp()
         {
-            _activator = new BuiltinHandlerActivator();
+            _activator = Using(new BuiltinHandlerActivator());
 
             _persistentSagaData = new ConcurrentDictionary<Guid, ISagaData>();
 
@@ -38,16 +41,27 @@ namespace Rebus.Tests.Integration
                 .Transport(t =>
                 {
                     t.UseInMemoryTransport(new InMemNetwork(), "bimse");
-                    t.Decorate(c => new IntroducerOfTransportInstability(c.Get<ITransport>(), MakeEveryFifthMessageFail));
+                    t.Decorate(c =>
+                    {
+                        var transport = c.Get<ITransport>();
+
+                        return new IntroducerOfTransportInstability(transport, MakeEveryFifthMessageFail);
+                    });
                 })
                 .Sagas(s =>
                 {
-                    s.Decorate(c => new SagaStorageTap(c.Get<ISagaStorage>(), _persistentSagaData));
+                    s.Decorate(c =>
+                    {
+                        var sagaStorage = c.Get<ISagaStorage>();
+
+                        return new SagaStorageTap(sagaStorage, _persistentSagaData);
+                    });
+
+                    s.StoreInMemory();
                 })
                 .Options(o =>
                 {
                     o.EnableIdempotentSagas();
-                    o.LogPipeline(verbose: true);
                 })
                 .Start();
         }
@@ -63,7 +77,7 @@ namespace Rebus.Tests.Integration
             var allMessagesReceived = new ManualResetEvent(false);
             var receivedMessages = new ConcurrentQueue<OutgoingMessage>();
 
-            _activator.Register(() => new MyIdempotentSaga(allMessagesReceived, _activator.Bus));
+            _activator.Register((b, context) => new MyIdempotentSaga(allMessagesReceived, b));
             _activator.Register(() => new OutgoingMessageCollector(receivedMessages));
 
             var messagesToSend = Enumerable
@@ -79,9 +93,11 @@ namespace Rebus.Tests.Integration
 
             await Task.WhenAll(messagesToSend.Select(message => _bus.SendLocal(message)));
 
-            allMessagesReceived.WaitOrDie(TimeSpan.FromSeconds(5));
+            allMessagesReceived.WaitOrDie(TimeSpan.FromSeconds(10));
 
-            await Task.Delay(300);
+            Console.WriteLine("All messages processed by the saga - waiting for messages in outgoing message collector...");
+
+            await Task.Delay(1000);
 
             var allIdempotentSagaData = _persistentSagaData.Values
                 .OfType<MyIdempotentSagaData>()
@@ -95,7 +111,7 @@ namespace Rebus.Tests.Integration
 
             Assert.That(instance.CountPerId.All(c => c.Value == 1), Is.True,
                 "Not all counts were exactly one: {0} - this is a sign that the saga was not truly idempotent, as the redelivery should have been caught!",
-                string.Join(", ", instance.CountPerId.Where(c => c.Value > 1).Select(c => string.Format("{0}: {1}", c.Key, c.Value))));
+                string.Join(", ", instance.CountPerId.Where(c => c.Value > 1).Select(c => $"{c.Key}: {c.Value}")));
 
             var outgoingMessagesById = receivedMessages.GroupBy(m => m.Id).ToList();
 
@@ -205,11 +221,10 @@ namespace Rebus.Tests.Integration
             {
                 CountPerId = new Dictionary<int, int>();
             }
-            //public Guid Id { get; set; }
-            //public int Revision { get; set; }
+
             public string CorrelationId { get; set; }
-            public Dictionary<int, int> CountPerId { get; set; }
-            //public IdempotencyData IdempotencyData { get; set; }
+
+            public Dictionary<int, int> CountPerId { get; }
         }
 
         class MyMessage
@@ -220,7 +235,7 @@ namespace Rebus.Tests.Integration
             public bool SendOutgoingMessage { get; set; }
             public override string ToString()
             {
-                return string.Format("MyMessage {0}/{1}", Id, Total);
+                return $"MyMessage {Id}/{Total}";
             }
         }
 
@@ -251,9 +266,9 @@ namespace Rebus.Tests.Integration
                 await _innerTransport.Send(destinationAddress, message, context);
             }
 
-            public async Task<TransportMessage> Receive(ITransactionContext context)
+            public async Task<TransportMessage> Receive(ITransactionContext context, CancellationToken cancellationToken)
             {
-                var transportMessage = await _innerTransport.Receive(context);
+                var transportMessage = await _innerTransport.Receive(context, cancellationToken);
                 if (transportMessage == null) return null;
 
                 var shouldFailThisTime = Interlocked.Increment(ref _failCounter) % _failFactor == 0;

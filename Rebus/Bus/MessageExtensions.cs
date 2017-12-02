@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using Rebus.Extensions;
 using Rebus.Messages;
-using Rebus.Pipeline.Receive;
 using Rebus.Transport;
 
 namespace Rebus.Bus
@@ -38,9 +37,28 @@ namespace Rebus.Bus
         /// <summary>
         /// Sets the <see cref="Headers.DeferredUntil"/> header to the specified time
         /// </summary>
-        public static void SetDeferHeader(this Message message, DateTimeOffset approximateDeliveryTime)
+        public static void SetDeferHeaders(this Message message, DateTimeOffset approximateDeliveryTime, string destinationAddress)
         {
-            message.Headers[Headers.DeferredUntil] = approximateDeliveryTime.ToIso8601DateTimeOffset();
+            InnerSetDeferHeaders(approximateDeliveryTime, message.Headers, destinationAddress);
+        }
+
+        /// <summary>
+        /// Sets the <see cref="Headers.DeferredUntil"/> header to the specified time
+        /// </summary>
+        public static void SetDeferHeaders(this TransportMessage message, DateTimeOffset approximateDeliveryTime, string destinationAddress)
+        {
+            InnerSetDeferHeaders(approximateDeliveryTime, message.Headers, destinationAddress);
+        }
+
+        static void InnerSetDeferHeaders(DateTimeOffset approximateDeliveryTime, Dictionary<string, string> headers, string destinationAddress)
+        {
+            headers[Headers.DeferredUntil] = approximateDeliveryTime.ToIso8601DateTimeOffset();
+
+            // do not overwrite the recipient if it has been set
+            if (!headers.ContainsKey(Headers.DeferredRecipient))
+            {
+                headers[Headers.DeferredRecipient] = destinationAddress;
+            }
         }
 
         /// <summary>
@@ -54,9 +72,26 @@ namespace Rebus.Bus
         }
 
         /// <summary>
+        /// Gets the message type from the message
+        /// </summary>
+        public static string GetMessageType(this TransportMessage message)
+        {
+            return message.Headers.GetValueOrNull(Headers.Type)
+                   ?? "<unknown>";
+        }
+
+        /// <summary>
         /// Gets the message ID from the message
         /// </summary>
         public static string GetMessageId(this Message message)
+        {
+            return message.Headers.GetValue(Headers.MessageId);
+        }
+
+        /// <summary>
+        /// Gets the message ID from the message
+        /// </summary>
+        public static string GetMessageId(this TransportMessage message)
         {
             return message.Headers.GetValue(Headers.MessageId);
         }
@@ -87,11 +122,9 @@ namespace Rebus.Bus
 
         static string GetMessageLabel(Dictionary<string, string> headers)
         {
-            var id = headers.GetValue(Headers.MessageId);
+            var id = headers.GetValueOrNull(Headers.MessageId) ?? "<unknown>";
 
-            string type;
-
-            if (headers.TryGetValue(Headers.Type, out type))
+            if (headers.TryGetValue(Headers.Type, out var type))
             {
                 var dotnetType = Type.GetType(type);
 
@@ -105,12 +138,12 @@ namespace Rebus.Bus
                 type = "<unknown>";
             }
 
-            return string.Format("{0}/{1}", type, id);
+            return $"{type}/{id}";
         }
 
         static string GetTypeNameFromBodyObjectOrNull(object body)
         {
-            return body == null ? null : body.GetType().GetSimpleAssemblyQualifiedName();
+            return body?.GetType().GetSimpleAssemblyQualifiedName();
         }
     }
 }

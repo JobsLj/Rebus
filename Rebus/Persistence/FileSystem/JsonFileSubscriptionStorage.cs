@@ -13,21 +13,24 @@ using Rebus.Subscriptions;
 namespace Rebus.Persistence.FileSystem
 {
     /// <summary>
-    /// Implementation of <see cref="ISubscriptionStorage"/> that stores subscriptions in a JSON file
+    /// Implementation of <see cref="ISubscriptionStorage"/> that stores subscriptions in a JSON file. Access to the file is synchronized within the process with a <see cref="ReaderWriterLockSlim"/>
     /// </summary>
-    public class JsonFileSubscriptionStorage : ISubscriptionStorage
+    public class JsonFileSubscriptionStorage : ISubscriptionStorage, IDisposable
     {
         static readonly Encoding FileEncoding = Encoding.UTF8;
 
         readonly ReaderWriterLockSlim _readerWriterLockSlim = new ReaderWriterLockSlim();
         readonly string _jsonFilePath;
 
+        bool _disposed;
+
         /// <summary>
         /// Constructs the subscription storage
         /// </summary>
-        public JsonFileSubscriptionStorage(string jsonFilePath)
+        public JsonFileSubscriptionStorage(string jsonFilePath, bool isCentralized = false)
         {
-            _jsonFilePath = jsonFilePath;
+            _jsonFilePath = jsonFilePath ?? throw new ArgumentNullException(nameof(jsonFilePath));
+            IsCentralized = isCentralized;
         }
 
         /// <summary>
@@ -35,21 +38,14 @@ namespace Rebus.Persistence.FileSystem
         /// </summary>
         public async Task<string[]> GetSubscriberAddresses(string topic)
         {
-            try
+            // !!! DONT USE ASYNC/AWAIT IN HERE BECAUSE OF THE READERWRITERLOCKSLIM
+            using (_readerWriterLockSlim.ReadLock())
             {
-                _readerWriterLockSlim.EnterReadLock();
-
                 var subscriptions = GetSubscriptions();
 
-                HashSet<string> subscribers;
-
-                return subscriptions.TryGetValue(topic, out subscribers)
+                return subscriptions.TryGetValue(topic, out var subscribers)
                     ? subscribers.ToArray()
                     : new string[0];
-            }
-            finally
-            {
-                _readerWriterLockSlim.ExitReadLock();
             }
         }
 
@@ -58,10 +54,9 @@ namespace Rebus.Persistence.FileSystem
         /// </summary>
         public async Task RegisterSubscriber(string topic, string subscriberAddress)
         {
-            try
+            // !!! DONT USE ASYNC/AWAIT IN HERE BECAUSE OF THE READERWRITERLOCKSLIM
+            using (_readerWriterLockSlim.WriteLock())
             {
-                _readerWriterLockSlim.EnterWriteLock();
-
                 var subscriptions = GetSubscriptions();
 
                 subscriptions
@@ -70,10 +65,6 @@ namespace Rebus.Persistence.FileSystem
 
                 SaveSubscriptions(subscriptions);
             }
-            finally
-            {
-                _readerWriterLockSlim.ExitWriteLock();
-            }
         }
 
         /// <summary>
@@ -81,10 +72,9 @@ namespace Rebus.Persistence.FileSystem
         /// </summary>
         public async Task UnregisterSubscriber(string topic, string subscriberAddress)
         {
-            try
+            // !!! DONT USE ASYNC/AWAIT IN HERE BECAUSE OF THE READERWRITERLOCKSLIM
+            using (_readerWriterLockSlim.WriteLock())
             {
-                _readerWriterLockSlim.EnterWriteLock();
-
                 var subscriptions = GetSubscriptions();
 
                 subscriptions
@@ -93,26 +83,24 @@ namespace Rebus.Persistence.FileSystem
 
                 SaveSubscriptions(subscriptions);
             }
-            finally
-            {
-                _readerWriterLockSlim.ExitWriteLock();
-            }
         }
 
         void SaveSubscriptions(Dictionary<string, HashSet<string>> subscriptions)
         {
+            // !!! DONT USE ASYNC/AWAIT IN HERE BECAUSE OF THE READERWRITERLOCKSLIM
             var jsonText = JsonConvert.SerializeObject(subscriptions, Formatting.Indented);
 
             File.WriteAllText(_jsonFilePath, jsonText, FileEncoding);
         }
 
-        Dictionary<string, HashSet<String>> GetSubscriptions()
+        Dictionary<string, HashSet<string>> GetSubscriptions()
         {
+            // !!! DONT USE ASYNC/AWAIT IN HERE BECAUSE OF THE READERWRITERLOCKSLIM
             try
             {
                 var jsonText = File.ReadAllText(_jsonFilePath, FileEncoding);
 
-                var subscriptions = JsonConvert.DeserializeObject<Dictionary<string, HashSet<String>>>(jsonText);
+                var subscriptions = JsonConvert.DeserializeObject<Dictionary<string, HashSet<string>>>(jsonText);
 
                 return subscriptions;
             }
@@ -125,9 +113,23 @@ namespace Rebus.Persistence.FileSystem
         /// <summary>
         /// Gets whether this subscription storage is centralized (which it shouldn't be - that would probably cause some pretty nasty locking exceptions!)
         /// </summary>
-        public bool IsCentralized
+        public bool IsCentralized { get; }
+
+        /// <summary>
+        /// Disposes the <see cref="ReaderWriterLockSlim"/> that guards access to the file
+        /// </summary>
+        public void Dispose()
         {
-            get { return false; }
+            if (_disposed) return;
+
+            try
+            {
+                _readerWriterLockSlim.Dispose();
+            }
+            finally
+            {
+                _disposed = true;
+            }
         }
     }
 }

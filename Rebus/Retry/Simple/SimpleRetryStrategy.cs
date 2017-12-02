@@ -1,4 +1,4 @@
-﻿using Rebus.Transport;
+﻿using System;
 
 namespace Rebus.Retry.Simple
 {
@@ -7,28 +7,27 @@ namespace Rebus.Retry.Simple
     /// </summary>
     public class SimpleRetryStrategy : IRetryStrategy
     {
-        readonly ITransport _transport;
         readonly SimpleRetryStrategySettings _simpleRetryStrategySettings;
+        readonly IErrorTracker _errorTracker;
+        readonly IErrorHandler _errorHandler;
 
         /// <summary>
         /// Constructs the retry strategy with the given settings, creating an error queue with the configured name if necessary
         /// </summary>
-        public SimpleRetryStrategy(ITransport transport, SimpleRetryStrategySettings simpleRetryStrategySettings)
+        public SimpleRetryStrategy(SimpleRetryStrategySettings simpleRetryStrategySettings, IErrorTracker errorTracker, IErrorHandler errorHandler)
         {
-            _transport = transport;
-            _simpleRetryStrategySettings = simpleRetryStrategySettings;
-
-            var errorQueueAddress = _simpleRetryStrategySettings.ErrorQueueAddress;
-            
-            _transport.CreateQueue(errorQueueAddress);
+            _simpleRetryStrategySettings = simpleRetryStrategySettings ?? throw new ArgumentNullException(nameof(simpleRetryStrategySettings));
+            _errorTracker = errorTracker ?? throw new ArgumentNullException(nameof(errorTracker));
+            _errorHandler = errorHandler ?? throw new ArgumentNullException(nameof(errorHandler));
         }
 
         /// <summary>
         /// Gets the retry step with appropriate settings for this <see cref="SimpleRetryStrategy"/>
         /// </summary>
-        public IRetryStrategyStep GetRetryStep()
-        {
-            return new SimpleRetryStrategyStep(_transport, _simpleRetryStrategySettings);
-        }
+        public IRetryStrategyStep GetRetryStep() => new SimpleRetryStrategyStep(
+            _simpleRetryStrategySettings,
+            _errorTracker,
+            _errorHandler
+        );
     }
 }

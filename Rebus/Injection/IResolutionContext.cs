@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+﻿using System.Collections;
 
 namespace Rebus.Injection
 {
@@ -15,6 +15,11 @@ namespace Rebus.Injection
         /// <summary>
         /// Gets all instances resolved within this resolution context at this time.
         /// </summary>
-        IEnumerable<T> GetTrackedInstancesOf<T>();
+        IEnumerable TrackedInstances { get; }
+
+        /// <summary>
+        /// Gets whether there exists a primary registration for the <typeparamref name="TService"/> type
+        /// </summary>
+        bool Has<TService>(bool primary = true);
     }
 }

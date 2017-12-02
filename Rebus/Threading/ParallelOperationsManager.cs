@@ -9,42 +9,37 @@ namespace Rebus.Threading
     /// </summary>
     public class ParallelOperationsManager
     {
+        readonly int _maxParallelism;
         readonly SemaphoreSlim _semaphore;
-        long _currentParallelism;
 
         /// <summary>
         /// Constructs the container with the given max number of parallel async operations to allow
         /// </summary>
         public ParallelOperationsManager(int maxParallelism)
         {
+            _maxParallelism = maxParallelism;
             _semaphore = new SemaphoreSlim(maxParallelism, maxParallelism);
         }
 
         /// <summary>
         /// Gets whether any async tasks are currently waiting to be completed
         /// </summary>
-        public bool HasPendingTasks
-        {
-            get { return Interlocked.Read(ref _currentParallelism) > 0; }
-        }
+        public virtual bool HasPendingTasks => _semaphore.CurrentCount != _maxParallelism;
 
         /// <summary>
         /// Begins another async operation and returns an <see cref="IDisposable"/> that must be disposed in order to mark the end of the async operation
         /// </summary>
         public ParallelOperation TryBegin()
         {
-            if (!_semaphore.Wait(TimeSpan.Zero))
-            {
-                return new ParallelOperation(() => { }, false);
-            }
-            
-            Interlocked.Increment(ref _currentParallelism);
+            var canContinue = _semaphore.Wait(TimeSpan.Zero);
 
-            return new ParallelOperation(() =>
-            {
-                Interlocked.Decrement(ref _currentParallelism);
-                _semaphore.Release();
-            }, true);
+            return new ParallelOperation(canContinue, this);
+        }
+
+
+        void OperationFinished()
+        {
+            _semaphore.Release(1);
         }
 
         /// <summary>
@@ -52,18 +47,29 @@ namespace Rebus.Threading
         /// </summary>
         public class ParallelOperation : IDisposable
         {
-            readonly Action _disposeAction;
             readonly bool _canContinue;
+            readonly ParallelOperationsManager _parallelOperationsManager;
 
-            internal ParallelOperation(Action disposeAction, bool canContinue)
+            bool _disposed;
+
+            internal ParallelOperation(bool canContinue, ParallelOperationsManager parallelOperationsManager)
             {
-                _disposeAction = disposeAction;
                 _canContinue = canContinue;
+                _parallelOperationsManager = parallelOperationsManager;
             }
 
+            /// <summary>
+            /// Ends this parallel operation
+            /// </summary>
             public void Dispose()
             {
-                _disposeAction();
+                if (!_canContinue) return;
+                if (_disposed) return;
+
+                _parallelOperationsManager.OperationFinished();
+
+                // guard against ever accidentally finishing the operation more than once
+                _disposed = true;
             }
 
             /// <summary>

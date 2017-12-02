@@ -5,43 +5,44 @@ using NUnit.Framework;
 using Rebus.Activation;
 using Rebus.Bus;
 using Rebus.Config;
+using Rebus.Exceptions;
 using Rebus.Extensions;
 using Rebus.Logging;
 using Rebus.Messages;
 using Rebus.Retry.Simple;
 using Rebus.Routing.TypeBased;
-using Rebus.Tests.Extensions;
-using Rebus.Transport.Msmq;
+using Rebus.Tests.Contracts;
+using Rebus.Tests.Contracts.Extensions;
+using Rebus.Transport.InMem;
+
+#pragma warning disable 1998
 
 namespace Rebus.Tests.Integration
 {
-    [TestFixture, Category(Categories.Msmq)]
+    [TestFixture]
     public class TestRetry : FixtureBase
     {
-        static readonly string InputQueueName = TestConfig.QueueName(string.Format("test.rebus2.retries.input@{0}", Environment.MachineName));
-        static readonly string ErrorQueueName = TestConfig.QueueName("rebus2.error");
+        static readonly string InputQueueName = TestConfig.GetName($"test.rebus2.retries.input@{GetMachineName()}");
+        static readonly string ErrorQueueName = TestConfig.GetName("rebus2.error");
 
         BuiltinHandlerActivator _handlerActivator;
         IBus _bus;
+        InMemNetwork _network;
 
         void InitializeBus(int numberOfRetries)
         {
+            _network = new InMemNetwork();
+
             _handlerActivator = new BuiltinHandlerActivator();
 
             _bus = Configure.With(_handlerActivator)
                 .Logging(l => l.Console(minLevel: LogLevel.Warn))
-                .Transport(t => t.UseMsmq(InputQueueName))
+                .Transport(t => t.UseInMemoryTransport(_network, InputQueueName))
                 .Routing(r => r.TypeBased().Map<string>(InputQueueName))
                 .Options(o => o.SimpleRetryStrategy(maxDeliveryAttempts: numberOfRetries, errorQueueAddress: ErrorQueueName))
                 .Start();
 
             Using(_bus);
-        }
-
-        protected override void TearDown()
-        {
-            MsmqUtil.Delete(InputQueueName);
-            MsmqUtil.Delete(ErrorQueueName);
         }
 
         [Test]
@@ -56,27 +57,21 @@ namespace Rebus.Tests.Integration
             _handlerActivator.Handle<string>(async _ =>
             {
                 Interlocked.Increment(ref attemptedDeliveries);
-                throw new ApplicationException("omgwtf!");
+                throw new RebusApplicationException("omgwtf!");
             });
 
             await _bus.Send("hej");
 
-            using (var errorQueue = new MsmqTransport(ErrorQueueName))
-            {
-                var failedMessage = await errorQueue.AwaitReceive();
+            var failedMessage = await _network.WaitForNextMessageFrom(ErrorQueueName);
 
-                Assert.That(attemptedDeliveries, Is.EqualTo(numberOfRetries));
-                Assert.That(failedMessage.Headers.GetValue(Headers.ErrorDetails), Contains.Substring("5 unhandled exceptions"));
-                Assert.That(failedMessage.Headers.GetValue(Headers.SourceQueue), Is.EqualTo(InputQueueName));
-            }
+            Assert.That(attemptedDeliveries, Is.EqualTo(numberOfRetries));
+            Assert.That(failedMessage.Headers.GetValue(Headers.ErrorDetails), Contains.Substring("5 unhandled exceptions"));
+            Assert.That(failedMessage.Headers.GetValue(Headers.SourceQueue), Is.EqualTo(InputQueueName));
         }
 
         [TestCase(1)]
         [TestCase(2)]
         [TestCase(5)]
-        [TestCase(40)]
-        [TestCase(70)]
-        [TestCase(90)]
         public async Task CanConfigureNumberOfRetries(int numberOfRetries)
         {
             InitializeBus(numberOfRetries);
@@ -86,19 +81,25 @@ namespace Rebus.Tests.Integration
             _handlerActivator.Handle<string>(async _ =>
             {
                 Interlocked.Increment(ref attemptedDeliveries);
-                throw new ApplicationException("omgwtf!");
+                throw new RebusApplicationException("omgwtf!");
             });
 
             await _bus.Send("hej");
 
-            using (var errorQueue = new MsmqTransport(ErrorQueueName))
-            {
-                var expectedNumberOfAttemptedDeliveries = numberOfRetries;
+            await _network.WaitForNextMessageFrom(ErrorQueueName);
 
-                await errorQueue.AwaitReceive(2 + numberOfRetries / 10.0);
+            var expectedNumberOfAttemptedDeliveries = numberOfRetries;
 
-                Assert.That(attemptedDeliveries, Is.EqualTo(expectedNumberOfAttemptedDeliveries));
-            }
+            Assert.That(attemptedDeliveries, Is.EqualTo(expectedNumberOfAttemptedDeliveries));
+        }
+
+        private static string GetMachineName()
+        {
+#if NETSTANDARD1_3
+            return Environment.GetEnvironmentVariable("COMPUTERNAME") ?? Environment.GetEnvironmentVariable("HOSTNAME");
+#else
+            return Environment.MachineName;
+#endif
         }
     }
 }

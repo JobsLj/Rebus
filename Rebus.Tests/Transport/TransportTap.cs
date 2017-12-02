@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Rebus.Config;
 using Rebus.Messages;
@@ -24,6 +25,8 @@ namespace Rebus.Tests.Transport
         public event Action<TransportMessage> MessageSent = delegate { }; 
         
         public event Action<TransportMessage> MessageReceived = delegate { }; 
+        
+        public event Action NoMessageReceived = delegate { }; 
 
         public void CreateQueue(string address)
         {
@@ -39,15 +42,19 @@ namespace Rebus.Tests.Transport
             MessageSent(message);
         }
 
-        public async Task<TransportMessage> Receive(ITransactionContext context)
+        public async Task<TransportMessage> Receive(ITransactionContext context, CancellationToken cancellationToken)
         {
-            var transportMessage = await _innerTransport.Receive(context);
+            var transportMessage = await _innerTransport.Receive(context, cancellationToken);
 
             if (transportMessage != null)
             {
                 _receivedMessages.Add(transportMessage);
 
                 MessageReceived(transportMessage);
+            }
+            else
+            {
+                NoMessageReceived();
             }
 
             return transportMessage;

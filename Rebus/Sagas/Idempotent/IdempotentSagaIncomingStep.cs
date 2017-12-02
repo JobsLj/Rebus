@@ -20,21 +20,18 @@ namespace Rebus.Sagas.Idempotent
 If that is the case, message dispatch is skipped, but any messages stored as outgoing messages from previously handling the incoming message will be sent.")]
     public class IdempotentSagaIncomingStep : IIncomingStep
     {
-        static ILog _log;
-
-        static IdempotentSagaIncomingStep()
-        {
-            RebusLoggerFactory.Changed += f => _log = f.GetCurrentClassLogger();
-        }
-
         readonly ITransport _transport;
+        readonly ILog _log;
 
         /// <summary>
         /// Constructs the step
         /// </summary>
-        public IdempotentSagaIncomingStep(ITransport transport)
+        public IdempotentSagaIncomingStep(ITransport transport, IRebusLoggerFactory rebusLoggerFactory)
         {
+            if (transport == null) throw new ArgumentNullException(nameof(transport));
+            if (rebusLoggerFactory == null) throw new ArgumentNullException(nameof(rebusLoggerFactory));
             _transport = transport;
+            _log = rebusLoggerFactory.GetLogger<IdempotentSagaIncomingStep>();
         }
 
         /// <summary>
@@ -63,7 +60,7 @@ If that is the case, message dispatch is skipped, but any messages stored as out
 
                 if (idempotencyData.HasAlreadyHandled(messageId))
                 {
-                    _log.Info("Message with ID {0} has already been handled by saga with ID {1}",
+                    _log.Info("Message with ID {messageId} has already been handled by saga with ID {sagaDataId}",
                         messageId, sagaData.Id);
 
                     var outgoingMessages = idempotencyData
@@ -72,16 +69,16 @@ If that is the case, message dispatch is skipped, but any messages stored as out
 
                     if (outgoingMessages.Any())
                     {
-                        _log.Info("Found {0} outgoing messages to be (re-)sent... will do that now",
+                        _log.Info("Found {messageCount} outgoing messages to be (re-)sent... will do that now",
                             outgoingMessages.Count);
 
                         foreach (var messageToResend in outgoingMessages)
                         {
                             foreach (var destinationAddress in messageToResend.DestinationAddresses)
                             {
-                                await
-                                    _transport.Send(destinationAddress, messageToResend.TransportMessage,
-                                        transactionContext);
+                                var transportMessage = messageToResend.TransportMessage;
+
+                                await _transport.Send(destinationAddress, transportMessage, transactionContext).ConfigureAwait(false);
                             }
                         }
                     }
@@ -98,7 +95,7 @@ If that is the case, message dispatch is skipped, but any messages stored as out
                 }
             }
 
-            await next();
+            await next().ConfigureAwait(false);
         }
     }
 }

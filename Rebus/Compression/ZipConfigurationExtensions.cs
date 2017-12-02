@@ -1,7 +1,6 @@
 ﻿using Rebus.Config;
-using Rebus.Pipeline;
-using Rebus.Pipeline.Receive;
-using Rebus.Pipeline.Send;
+using Rebus.DataBus;
+using Rebus.Serialization;
 
 namespace Rebus.Compression
 {
@@ -19,16 +18,26 @@ namespace Rebus.Compression
         /// Enables compression of outgoing messages if the size exceeds the specified number of bytes
         /// (defaults to <see cref="DefaultBodyThresholdBytes"/>)
         /// </summary>
-        public static OptionsConfigurer EnableCompression(this OptionsConfigurer configurer,
-            int bodySizeThresholdBytes = DefaultBodyThresholdBytes)
+        public static void EnableCompression(this OptionsConfigurer configurer, int bodySizeThresholdBytes = DefaultBodyThresholdBytes)
         {
-            configurer.Register(c => new Zipper());
-            configurer.Register(c => new UnzipMessagesIncomingStep(c.Get<Zipper>()));
-            configurer.Register(c => new ZipMessagesOutgoingStep(c.Get<Zipper>(), bodySizeThresholdBytes));
+            configurer.Decorate<ISerializer>(c => new ZippingSerializerDecorator(c.Get<ISerializer>(), new Zipper(), bodySizeThresholdBytes));
+        }
 
-            configurer.Decorate<IPipeline>(c => new PipelineStepInjector(c.Get<IPipeline>())
-                .OnReceive(c.Get<UnzipMessagesIncomingStep>(), PipelineRelativePosition.Before, typeof(DeserializeIncomingMessageStep))
-                .OnSend(c.Get<ZipMessagesOutgoingStep>(), PipelineRelativePosition.After, typeof(SerializeOutgoingMessageStep)));
+        /// <summary>
+        /// Enables GZIP of the saved data bus data. Set <paramref name="dataCompressionMode"/> to control when data is gzipped - if <see cref="DataCompressionMode.Always"/>
+        /// is selected the data will always be GZIPped, whereas selecting <see cref="DataCompressionMode.Explicit"/> makes the data be GZIPped
+        /// only when <see cref="MetadataKeys.ContentEncoding"/> = "gzip" is detected among the metadata for the stored data.
+        /// Please note that GZIPping the data requires that it can be fully contained in memory because the underlying streaming APIs do not support lazy-reading a
+        /// GZIP stream.
+        /// </summary>
+        public static StandardConfigurer<IDataBusStorage> UseCompression(this StandardConfigurer<IDataBusStorage> configurer, DataCompressionMode dataCompressionMode)
+        {
+            configurer.Decorate(c =>
+            {
+                var dataBusStorage = c.Get<IDataBusStorage>();
+
+                return new ZippingDataBusStorageDecorator(dataBusStorage, dataCompressionMode);
+            });
 
             return configurer;
         }

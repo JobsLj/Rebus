@@ -1,3 +1,5 @@
+using System;
+using Rebus.Injection;
 using Rebus.Logging;
 
 namespace Rebus.Config
@@ -8,12 +10,20 @@ namespace Rebus.Config
     /// </summary>
     public class RebusLoggingConfigurer
     {
+        readonly Injectionist _injectionist;
+
+        internal RebusLoggingConfigurer(Injectionist injectionist)
+        {
+            if (injectionist == null) throw new ArgumentNullException(nameof(injectionist));
+            _injectionist = injectionist;
+        }
+
         /// <summary>
         /// Configures Rebus to log its stuff to stdout, possibly ignore logged lines under the specified <see cref="LogLevel"/>
         /// </summary>
         public void Console(LogLevel minLevel = LogLevel.Debug)
         {
-            UseLoggerFactory(new ConsoleLoggerFactory(false)
+            Use(new ConsoleLoggerFactory(false)
             {
                 MinLevel = minLevel
             });
@@ -24,7 +34,7 @@ namespace Rebus.Config
         /// </summary>
         public void ColoredConsole(LogLevel minLevel = LogLevel.Debug)
         {
-            UseLoggerFactory(new ConsoleLoggerFactory(true)
+            Use(new ConsoleLoggerFactory(true)
             {
                 MinLevel = minLevel
             });
@@ -35,7 +45,7 @@ namespace Rebus.Config
         /// </summary>
         public void Trace()
         {
-            UseLoggerFactory(new TraceLoggerFactory());
+            Use(new TraceLoggerFactory());
         }
 
         /// <summary>
@@ -43,12 +53,32 @@ namespace Rebus.Config
         /// </summary>
         public void None()
         {
-            UseLoggerFactory(new NullLoggerFactory());
+            Use(new NullLoggerFactory());
         }
 
-        static void UseLoggerFactory(IRebusLoggerFactory consoleLoggerFactory)
+        /// <summary>
+        /// Configures this Rebus instance to use the specified logger factory
+        /// </summary>
+        public void Use(IRebusLoggerFactory rebusLoggerFactory)
         {
-            RebusLoggerFactory.Current = consoleLoggerFactory;
+            if (rebusLoggerFactory == null) throw new ArgumentNullException(nameof(rebusLoggerFactory));
+            _injectionist.Register(c => rebusLoggerFactory, $"This Rebus instance has been configured to use the {rebusLoggerFactory} logger factory");
+        }
+
+        /// <summary>
+        /// Registers the given factory function as a resolve of the given <typeparamref name="TService"/> service
+        /// </summary>
+        public void Register<TService>(Func<IResolutionContext, TService> factoryMethod, string description = null)
+        {
+            _injectionist.Register(factoryMethod, description: description);
+        }
+
+        /// <summary>
+        /// Registers the given factory function as a resolve of the given <typeparamref name="TService"/> service
+        /// </summary>
+        public void Decorate<TService>(Func<IResolutionContext, TService> factoryMethod, string description = null)
+        {
+            _injectionist.Decorate(factoryMethod, description: description);
         }
     }
 }
