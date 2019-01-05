@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using FluentAssertions;
 using NUnit.Framework;
 using Rebus.Compression;
 using Rebus.DataBus;
@@ -47,9 +46,9 @@ namespace Rebus.Tests.Contracts.DataBus
 
             Assert.That(hadLastReadTime, Is.False, "Did not expect the {0} key to be set", MetadataKeys.ReadTime);
 
-            var justSomeTime = new DateTimeOffset(1.January(2016));
+            var justSomeTime = new DateTimeOffset(new DateTime(2016, 1, 1));
 
-            RebusTimeMachine.FakeIt(justSomeTime);
+            _factory.FakeIt(justSomeTime);
 
             _storage.Read(knownId).Result.Dispose();
 
@@ -104,8 +103,9 @@ namespace Rebus.Tests.Contracts.DataBus
         [Test]
         public async Task CanGetStandardMetada()
         {
-            var fakeTime = new DateTimeOffset(17.June(2016));
-            RebusTimeMachine.FakeIt(fakeTime);
+            var fakeTime = new DateTimeOffset(new DateTime(2016, 6, 17));
+            
+            _factory.FakeIt(fakeTime);
 
             const string knownId = "known id";
 

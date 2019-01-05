@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading.Tasks;
 using Rebus.Pipeline;
 using Rebus.Testing;
+
 // ReSharper disable UnusedMember.Local
 
 namespace Rebus.DataBus
@@ -12,9 +13,7 @@ namespace Rebus.DataBus
     /// Model that represents a data bus attachment. Only the <see cref="Id"/> is significant, as all the
     /// other pieces of information are not required in order to retrieve the attachment from the database.
     /// </summary>
-#if NET45
     [Serializable]
-#endif
     public class DataBusAttachment
     {
         /// <summary>
@@ -41,13 +40,13 @@ namespace Rebus.DataBus
         /// Opens the attachment for reading, using the data bus of the bus that is handling the current message to read it.
         /// Is only available for calling inside message handlers.
         /// </summary>
-        public async Task<Stream> OpenRead() => await OpenRead(Id).ConfigureAwait(false);
+        public async Task<Stream> OpenRead() => await OpenRead(Id);
 
         /// <summary>
         /// Gets the metadata associated with the attachment, using the data bus of the bus that is handling the current message to read it.
         /// Is only available for calling inside message handlers.
         /// </summary>
-        public async Task<Dictionary<string, string>> GetMetadata() => await GetMetadata(Id).ConfigureAwait(false);
+        public async Task<Dictionary<string, string>> GetMetadata() => await GetMetadata(Id);
 
         /// <summary>
         /// Opens the attachment for reading, using the data bus of the bus that is handling the current message to read it.
@@ -59,7 +58,7 @@ namespace Rebus.DataBus
 
             var storage = GetDataBusStorage();
 
-            return await storage.Read(id).ConfigureAwait(false);
+            return await storage.Read(id);
         }
 
         /// <summary>
@@ -72,7 +71,7 @@ namespace Rebus.DataBus
 
             var storage = GetDataBusStorage();
 
-            return await storage.ReadMetadata(id).ConfigureAwait(false);
+            return await storage.ReadMetadata(id);
         }
 
         static IDataBusStorage GetDataBusStorage()
@@ -83,7 +82,7 @@ namespace Rebus.DataBus
 
         static IDataBusStorage GetDataBusStorageForTesting()
         {
-            return FakeDataBus.TestDataBusStorage;
+            return TestBackdoor.TestDataBusStorage;
         }
 
         static IDataBusStorage GetDataBusStorageFromMessageContext()
